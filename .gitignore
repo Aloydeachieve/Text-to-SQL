@@ -1,0 +1,24 @@
+# IDE/editor configs
+.vscode/
+.idea/
+.fleet/
+.nova/
+.zed/
+.DS_Store
+Thumbs.db
+
+# Caches and build outputs
+.phpunit.result.cache
+.phpunit.cache/
+.next/
+dist/
+build/
+node_modules/
+vendor/
+
+# Environment configurations
+.env
+.env.local
+.env.backup
+.env.production
+auth.json
