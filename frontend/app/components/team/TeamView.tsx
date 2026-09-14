@@ -29,13 +29,9 @@ export function TeamView({ currentUser, onOpenAuthModal }: TeamViewProps) {
   const isAdmin = currentUser?.role === 'admin';
 
   useEffect(() => {
-    let ignore = false;
-    if (!currentUser) {
-      setMembers([]);
-      setIsLoading(false);
-      return;
-    }
+    if (!currentUser) return;
 
+    let ignore = false;
     fetchCompanyMembers()
       .then((data) => {
         if (!ignore) {
