@@ -18,8 +18,8 @@ export default function RootLayout({
   children: React.ReactNode;
 }) {
   return (
-    <html lang="en" className={`${outfit.variable} dark`}>
-      <body className="antialiased min-h-screen grid-bg relative">
+    <html lang="en" className={`${outfit.variable} dark`} suppressHydrationWarning>
+      <body className="antialiased min-h-screen grid-bg relative" suppressHydrationWarning>
         <div className="absolute inset-0 bg-[radial-gradient(ellipse_at_top_right,rgba(59,130,246,0.06),transparent_50%)] pointer-events-none" />
         <div className="absolute inset-0 bg-[radial-gradient(ellipse_at_bottom_left,rgba(139,92,246,0.05),transparent_50%)] pointer-events-none" />
         {children}

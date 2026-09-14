@@ -7,6 +7,7 @@ use App\Models\Customer;
 use App\Services\AiSqlManager;
 use App\Services\SqlGuardrailService;
 use App\Services\SqlSchemaValidator;
+use App\Services\SqlSemanticValidator;
 use App\Services\SqlExecutorService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Http;
@@ -81,6 +82,49 @@ class TextToSqlTest extends TestCase
         $this->assertTrue($response->success);
         $this->assertEquals('SELECT name FROM customers WHERE city = "New York"', $response->sql);
         $this->assertEquals(0.95, $response->confidence);
+    }
+
+    /**
+     * Test: Configured Gemini model is passed correctly to the Gemini API request
+     */
+    public function test_gemini_driver_passes_configured_model_to_api_request(): void
+    {
+        config(['services.ai.driver' => 'gemini']);
+        config(['services.gemini.key' => 'mock-api-key']);
+        config(['services.gemini.model' => 'gemini-3.5-flash']);
+
+        Http::fake([
+            'generativelanguage.googleapis.com/*' => Http::response([
+                'candidates' => [[
+                    'content' => [
+                        'parts' => [[
+                            'text' => json_encode([
+                                'sql' => 'SELECT COUNT(*) FROM customers',
+                                'confidence' => 0.95,
+                                'explanation' => 'Counts customers.'
+                            ])
+                        ]]
+                    ]
+                ]]
+            ], 200)
+        ]);
+
+        $manager = app(AiSqlManager::class);
+        $response = $manager->generateSql('Count customers');
+
+        $this->assertTrue($response->success);
+        Http::assertSent(function ($request) {
+            return str_contains($request->url(), 'models/gemini-3.5-flash:generateContent');
+        });
+
+        // Verify runtime custom model configuration is passed to request
+        config(['services.gemini.model' => 'gemini-custom-override']);
+        $service = app(\App\Services\Ai\GeminiAiService::class);
+        $service->generateSql('Count customers again');
+
+        Http::assertSent(function ($request) {
+            return str_contains($request->url(), 'models/gemini-custom-override:generateContent');
+        });
     }
 
     /**
@@ -215,6 +259,7 @@ class TextToSqlTest extends TestCase
             'sql',
             'guardrails' => ['allowed', 'reason'],
             'schema_validation' => ['valid', 'reason'],
+            'semantic_validation' => ['valid', 'score', 'reason', 'interpretation', 'tables', 'operations', 'filters', 'grouping', 'ordering'],
             'execution' => ['success', 'error', 'time_ms', 'results'],
             'confidence',
             'explanation'
@@ -222,6 +267,7 @@ class TextToSqlTest extends TestCase
 
         $this->assertTrue($response->json('guardrails.allowed'));
         $this->assertTrue($response->json('schema_validation.valid'));
+        $this->assertTrue($response->json('semantic_validation.valid'));
         $this->assertTrue($response->json('execution.success'));
 
         // Assert logged in Database QueryLog
@@ -459,5 +505,173 @@ class TextToSqlTest extends TestCase
         $this->assertFalse($response->success);
         // Since test environment runs in 'testing', it returns the detailed local message:
         $this->assertStringContainsString('Connection timed out', $response->error);
+    }
+
+    /**
+     * Test 22: Semantic validation passes for valid customer count query
+     */
+    public function test_semantic_validation_passes_for_customer_count_query(): void
+    {
+        $validator = app(SqlSemanticValidator::class);
+        $res = $validator->validate('How many customers do we have?', 'SELECT COUNT(*) AS total_customers FROM customers');
+
+        $this->assertTrue($res['valid']);
+        $this->assertGreaterThanOrEqual(0.9, $res['score']);
+        $this->assertNull($res['reason']);
+        $this->assertContains('customers', $res['tables']);
+        $this->assertContains('COUNT', $res['operations']);
+        $this->assertStringContainsString('customers', strtolower($res['interpretation']));
+    }
+
+    /**
+     * Test 23: Semantic validation blocks safe, executable SQL that answers a different question
+     */
+    public function test_semantic_validation_blocks_executable_query_with_intent_mismatch(): void
+    {
+        $validator = app(SqlSemanticValidator::class);
+        // User asked for customers with most orders, but SQL only computes overall order count
+        $question = 'Which customers placed the most orders?';
+        $mismatchedSql = 'SELECT COUNT(*) AS total_orders FROM orders';
+
+        $res = $validator->validate($question, $mismatchedSql);
+
+        $this->assertFalse($res['valid']);
+        $this->assertLessThan(0.6, $res['score']);
+        $this->assertNotNull($res['reason']);
+        $this->assertStringContainsString('does not identify or rank individual customers', $res['reason']);
+        $this->assertEquals('Calculate the total number of orders.', $res['interpretation']);
+
+        // End-to-End API assertion: Ensure Controller blocks execution and does not run SQL
+        config(['services.ai.driver' => 'gemini']);
+        config(['services.gemini.key' => 'mock-gemini-key']);
+
+        Http::fake([
+            'generativelanguage.googleapis.com/*' => Http::response([
+                'candidates' => [[
+                    'content' => [
+                        'parts' => [[
+                            'text' => json_encode([
+                                'sql' => $mismatchedSql,
+                                'confidence' => 0.95,
+                                'explanation' => 'Calculates order count'
+                            ])
+                        ]]
+                    ]
+                ]]
+            ], 200)
+        ]);
+
+        $response = $this->postJson('/api/v1/query', [
+            'question' => $question
+        ]);
+
+        $response->assertStatus(200);
+        $this->assertTrue($response->json('guardrails.allowed'));
+        $this->assertTrue($response->json('schema_validation.valid'));
+        $this->assertFalse($response->json('semantic_validation.valid'));
+        $this->assertFalse($response->json('execution.success'));
+        $this->assertStringContainsString('Blocked by semantic intent verification', $response->json('execution.error'));
+        $this->assertEmpty($response->json('execution.results'));
+
+        // Query log records blocked execution status
+        $this->assertDatabaseHas('query_logs', [
+            'question' => $question,
+            'passed_guardrails' => true,
+            'execution_status' => 'blocked'
+        ]);
+    }
+
+    /**
+     * Test 24: Correct customer/order ranking query passes semantic validation
+     */
+    public function test_semantic_validation_passes_for_customer_order_ranking_query(): void
+    {
+        $validator = app(SqlSemanticValidator::class);
+        $question = 'Which customers placed the most orders?';
+        $correctSql = 'SELECT c.id, c.name, COUNT(o.id) as order_count FROM customers c JOIN orders o ON c.id = o.customer_id GROUP BY c.id, c.name ORDER BY order_count DESC';
+
+        $res = $validator->validate($question, $correctSql);
+
+        $this->assertTrue($res['valid']);
+        $this->assertGreaterThanOrEqual(0.9, $res['score']);
+        $this->assertNull($res['reason']);
+        $this->assertContains('customers', $res['tables']);
+        $this->assertContains('orders', $res['tables']);
+        $this->assertContains('COUNT', $res['operations']);
+        $this->assertContains('GROUP BY', $res['operations']);
+        $this->assertContains('ORDER BY DESC', $res['operations']);
+    }
+
+    /**
+     * Test 25: Monthly revenue query passes semantic validation
+     */
+    public function test_semantic_validation_passes_for_monthly_revenue_query(): void
+    {
+        $validator = app(SqlSemanticValidator::class);
+        $question = 'Show monthly revenue';
+        $sql = "SELECT DATE_FORMAT(order_date, '%Y-%m') AS month, SUM(total_amount) AS revenue FROM orders GROUP BY DATE_FORMAT(order_date, '%Y-%m') ORDER BY month ASC";
+
+        $res = $validator->validate($question, $sql);
+
+        $this->assertTrue($res['valid']);
+        $this->assertGreaterThanOrEqual(0.9, $res['score']);
+        $this->assertNull($res['reason']);
+        $this->assertContains('orders', $res['tables']);
+        $this->assertContains('SUM', $res['operations']);
+    }
+
+    /**
+     * Test 26: Semantic verifier handles malformed AI response safely
+     */
+    public function test_semantic_verifier_handles_malformed_ai_response_safely(): void
+    {
+        config(['services.ai.driver' => 'gemini']);
+        config(['services.gemini.key' => 'mock-gemini-key']);
+
+        // Mock Gemini returning non-JSON response for intent verification
+        Http::fake([
+            'generativelanguage.googleapis.com/*' => Http::response([
+                'candidates' => [[
+                    'content' => [
+                        'parts' => [[
+                            'text' => 'Not valid JSON from verifier'
+                        ]]
+                    ]
+                ]]
+            ], 200)
+        ]);
+
+        $gemini = app(\App\Services\Ai\GeminiAiService::class);
+        $validator = new SqlSemanticValidator(app(\App\Services\DatabaseSchemaService::class), $gemini);
+
+        $res = $validator->validate('Arbitrary custom query?', 'SELECT * FROM products');
+
+        $this->assertFalse($res['valid']);
+        $this->assertEquals(0.0, $res['score']);
+        $this->assertStringContainsString('malformed JSON', $res['reason']);
+    }
+
+    /**
+     * Test 27: Semantic verifier handles timeout and API failure safely
+     */
+    public function test_semantic_verifier_handles_timeout_and_api_failure_safely(): void
+    {
+        config(['services.ai.driver' => 'gemini']);
+        config(['services.gemini.key' => 'mock-gemini-key']);
+
+        Http::fake([
+            'generativelanguage.googleapis.com/*' => function () {
+                throw new \Illuminate\Http\Client\ConnectionException('Intent verification timeout');
+            }
+        ]);
+
+        $gemini = app(\App\Services\Ai\GeminiAiService::class);
+        $validator = new SqlSemanticValidator(app(\App\Services\DatabaseSchemaService::class), $gemini);
+
+        $res = $validator->validate('Arbitrary custom query?', 'SELECT * FROM products');
+
+        $this->assertFalse($res['valid']);
+        $this->assertEquals(0.0, $res['score']);
+        $this->assertStringContainsString('Intent verification timeout', $res['reason']);
     }
 }

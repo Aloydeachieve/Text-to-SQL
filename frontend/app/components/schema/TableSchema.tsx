@@ -4,20 +4,37 @@ import { TableInfo, RelationshipInfo } from '../../services/api';
 interface TableSchemaProps {
   table: TableInfo;
   relationships: RelationshipInfo[];
+  forceOpen?: boolean | null;
+  searchFilter?: string;
 }
 
-export function TableSchema({ table, relationships }: TableSchemaProps) {
-  const [isOpen, setIsOpen] = useState(false);
+export function TableSchema({ table, relationships, forceOpen = null, searchFilter = '' }: TableSchemaProps) {
+  const [userToggledOpen, setUserToggledOpen] = useState<boolean | null>(null);
+
+  const queryTerm = searchFilter.trim().toLowerCase();
+  const hasSearchMatch = queryTerm.length > 0 && (
+    table.name.toLowerCase().includes(queryTerm) ||
+    table.columns.some(c => c.name.toLowerCase().includes(queryTerm))
+  );
+
+  // Derive isOpen cleanly: user toggle takes precedence, then forceOpen, then search match
+  const isOpen = userToggledOpen !== null
+    ? userToggledOpen
+    : (forceOpen !== null ? forceOpen : hasSearchMatch);
 
   // Filter relationships involving this table
   const tableRels = relationships.filter(
-    rel => rel.from.startsWith(table.name + '.') || rel.to.startsWith(table.name + '.')
+    rel =>
+      rel.from.startsWith(table.name + '.') ||
+      rel.to.startsWith(table.name + '.') ||
+      rel.from_table === table.name ||
+      rel.to_table === table.name
   );
 
   return (
     <div className="border border-slate-850 rounded-xl overflow-hidden bg-slate-900/10 transition-all duration-200">
       <button
-        onClick={() => setIsOpen(!isOpen)}
+        onClick={() => setUserToggledOpen(!isOpen)}
         className="w-full flex items-center justify-between p-3.5 hover:bg-slate-850/30 transition-colors text-left"
       >
         <div className="flex items-center space-x-2">
@@ -26,9 +43,11 @@ export function TableSchema({ table, relationships }: TableSchemaProps) {
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 10h18M3 14h18m-9-4v8m-7 0h14a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z" />
             </svg>
           </span>
-          <span className="font-semibold text-sm text-slate-205 capitalize">{table.name}</span>
+          <span className="font-semibold text-sm text-slate-200 capitalize">
+            {table.name}
+          </span>
           <span className="text-[10px] bg-slate-800 text-slate-400 rounded px-1.5 py-0.5 font-mono">
-            {table.columns.length} columns
+            {table.columns.length} cols
           </span>
         </div>
         <span className="text-slate-500">
@@ -47,18 +66,45 @@ export function TableSchema({ table, relationships }: TableSchemaProps) {
         <div className="p-4 border-t border-slate-850/50 bg-slate-900/20 space-y-3.5">
           {/* Column Details */}
           <div className="space-y-1.5">
-            <div className="text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-2">Columns</div>
+            <div className="flex items-center justify-between text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-2">
+              <span>Columns</span>
+              <span>Type & Constraint</span>
+            </div>
             {table.columns.map((col, idx) => {
-              const isPK = col.type.toLowerCase().includes('pk') || col.name === 'id';
-              const isFK = col.type.toLowerCase().includes('fk') || col.name.endsWith('_id');
+              const isPK = col.primary || col.type.toLowerCase().includes('pk') || col.name === 'id';
+              const isFK = col.foreign || col.type.toLowerCase().includes('fk') || Boolean(col.referenced_table) || col.name.endsWith('_id');
+              const isMatched = queryTerm.length > 0 && col.name.toLowerCase().includes(queryTerm);
+
               return (
-                <div key={idx} className="flex items-center justify-between text-xs py-1.5 border-b border-slate-850/20 last:border-0">
-                  <div className="flex items-center space-x-1.5">
-                    {isPK && <span className="text-[10px] text-amber-500" title="Primary Key">🔑</span>}
-                    {isFK && <span className="text-[10px] text-blue-400" title="Foreign Key">🔗</span>}
-                    <span className="font-mono text-slate-300 font-medium">{col.name}</span>
+                <div
+                  key={idx}
+                  className={`flex items-center justify-between text-xs py-1.5 px-2 rounded-lg border-b border-slate-850/20 last:border-0 transition-colors ${
+                    isMatched ? 'bg-indigo-500/10 border-indigo-500/30' : 'hover:bg-slate-800/20'
+                  }`}
+                >
+                  <div className="flex items-center space-x-1.5 min-w-0">
+                    {isPK && <span className="text-[11px] text-amber-500 shrink-0" title="Primary Key">🔑</span>}
+                    {isFK && <span className="text-[11px] text-blue-400 shrink-0" title="Foreign Key">🔗</span>}
+                    <span className={`font-mono font-medium truncate ${isMatched ? 'text-indigo-200 font-bold' : 'text-slate-300'}`}>
+                      {col.name}
+                    </span>
+                    {col.referenced_table && (
+                      <span className="text-[9px] font-mono text-blue-400/80 bg-blue-950/40 px-1 py-0.5 rounded border border-blue-800/30 truncate max-w-[120px]" title={`References ${col.referenced_table}.${col.referenced_column || 'id'}`}>
+                        → {col.referenced_table}.{col.referenced_column || 'id'}
+                      </span>
+                    )}
                   </div>
-                  <span className="font-mono text-[10px] text-slate-500">{col.type}</span>
+
+                  <div className="flex items-center space-x-2 shrink-0">
+                    {col.nullable !== undefined && (
+                      <span className={`text-[9px] font-mono px-1 py-0.5 rounded ${col.nullable ? 'text-slate-500' : 'text-slate-400 bg-slate-800/40'}`}>
+                        {col.nullable ? 'null' : 'not null'}
+                      </span>
+                    )}
+                    <span className="font-mono text-[10px] text-slate-400 bg-slate-900/60 px-1.5 py-0.5 rounded border border-slate-800/50">
+                      {col.type}
+                    </span>
+                  </div>
                 </div>
               );
             })}
@@ -85,3 +131,5 @@ export function TableSchema({ table, relationships }: TableSchemaProps) {
     </div>
   );
 }
+
+export default TableSchema;

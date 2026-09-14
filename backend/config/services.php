@@ -41,6 +41,9 @@ return [
 
     'gemini' => [
         'key' => env('GEMINI_API_KEY'),
+        'model' => env('GEMINI_MODEL', 'gemini-3.5-flash'),
+        'timeout' => (int) env('GEMINI_TIMEOUT', 15),
+        'connect_timeout' => (int) env('GEMINI_CONNECT_TIMEOUT', 5),
     ],
 
 ];

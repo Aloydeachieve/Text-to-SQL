@@ -6,12 +6,13 @@ use App\Services\Contracts\AiServiceInterface;
 
 class RuleBasedAiService implements AiServiceInterface
 {
-    public function generateSql(string $question): AiSqlResponse
+    public function generateSql(string $question, ?string $schemaContext = null, string $driver = 'mysql'): AiSqlResponse
     {
         $q = strtolower(trim($question));
+        $isPgsql = in_array(strtolower($driver), ['pgsql', 'postgres', 'postgresql'], true);
 
         // 1. "How many customers do we have?"
-        if ($this->matchesKeywords($q, ['customer', 'how many']) || $this->matchesKeywords($q, ['customer', 'count'])) {
+        if ($this->matchesKeywords($q, ['customer', 'how many']) || $this->matchesKeywords($q, ['customer', 'count']) || $this->matchesKeywords($q, ['count', 'customer'])) {
             return new AiSqlResponse(
                 success: true,
                 sql: "SELECT COUNT(*) AS total_customers FROM customers",
@@ -20,7 +21,7 @@ class RuleBasedAiService implements AiServiceInterface
             );
         }
 
-        // 4. "Which customers placed the most orders?" (check before Q5 because it overlaps keywords)
+        // 2. "Which customers placed the most orders?"
         if ($this->matchesKeywords($q, ['customer', 'most', 'order']) || $this->matchesKeywords($q, ['customer', 'top', 'order'])) {
             return new AiSqlResponse(
                 success: true,
@@ -30,8 +31,8 @@ class RuleBasedAiService implements AiServiceInterface
             );
         }
 
-        // 2. "What are our top-selling products?"
-        if ($this->matchesKeywords($q, ['product', 'top']) || $this->matchesKeywords($q, ['product', 'best']) || $this->matchesKeywords($q, ['product', 'popular'])) {
+        // 3. "What are our top-selling products?"
+        if ($this->matchesKeywords($q, ['product', 'top']) || $this->matchesKeywords($q, ['product', 'best']) || $this->matchesKeywords($q, ['product', 'popular']) || $this->matchesKeywords($q, ['top-selling', 'product'])) {
             return new AiSqlResponse(
                 success: true,
                 sql: "SELECT p.id, p.name, p.category, SUM(oi.quantity) AS total_sold, SUM(oi.total_price) AS total_revenue FROM products p JOIN order_items oi ON p.id = oi.product_id GROUP BY p.id, p.name, p.category ORDER BY total_sold DESC LIMIT 5",
@@ -40,11 +41,15 @@ class RuleBasedAiService implements AiServiceInterface
             );
         }
 
-        // 3. "Show monthly revenue."
+        // 4. "Show monthly revenue."
         if ($this->matchesKeywords($q, ['monthly', 'revenue']) || $this->matchesKeywords($q, ['month', 'revenue']) || $this->matchesKeywords($q, ['monthly', 'sales'])) {
+            $sql = $isPgsql
+                ? "SELECT DATE_TRUNC('month', order_date) AS month, SUM(total_amount) AS revenue, COUNT(id) AS order_count FROM orders GROUP BY DATE_TRUNC('month', order_date) ORDER BY month ASC"
+                : "SELECT DATE_FORMAT(order_date, '%Y-%m') AS month, SUM(total_amount) AS revenue, COUNT(id) AS order_count FROM orders GROUP BY DATE_FORMAT(order_date, '%Y-%m') ORDER BY month ASC";
+
             return new AiSqlResponse(
                 success: true,
-                sql: "SELECT DATE_FORMAT(order_date, '%Y-%m') AS month, SUM(total_amount) AS revenue, COUNT(id) AS order_count FROM orders GROUP BY DATE_FORMAT(order_date, '%Y-%m') ORDER BY month ASC",
+                sql: $sql,
                 confidence: 0.92,
                 explanation: "Groups orders by their month of creation, aggregates the sum of their total amounts, and orders chronologically."
             );
@@ -52,19 +57,49 @@ class RuleBasedAiService implements AiServiceInterface
 
         // 5. "How many orders were placed this month?"
         if ($this->matchesKeywords($q, ['order', 'this month']) || $this->matchesKeywords($q, ['order', 'current month']) || $this->matchesKeywords($q, ['order', 'placed this month'])) {
+            $sql = $isPgsql
+                ? "SELECT COUNT(*) AS orders_this_month FROM orders WHERE order_date >= CURRENT_DATE - INTERVAL '1 month'"
+                : "SELECT COUNT(*) AS orders_this_month FROM orders WHERE order_date >= DATE_SUB(CURDATE(), INTERVAL 1 MONTH)";
+
             return new AiSqlResponse(
                 success: true,
-                sql: "SELECT COUNT(*) AS orders_this_month FROM orders WHERE order_date BETWEEN '2026-08-01' AND '2026-08-31'",
+                sql: $sql,
                 confidence: 0.90,
-                explanation: "Counts orders placed between August 1, 2026, and August 31, 2026."
+                explanation: "Counts orders placed in the current month."
             );
         }
 
-        // Fallback for custom queries during Phase 1
+        // Fallback for custom queries during testing/local
         return new AiSqlResponse(
             success: false,
-            error: "The local rule-based simulation driver only supports the 5 quick-start queries out-of-the-box. Please configure GEMINI_API_KEY in backend/.env to query arbitrary questions."
+            error: "The local rule-based simulation driver only supports predefined queries out-of-the-box. Please configure GEMINI_API_KEY in backend/.env to query arbitrary questions."
         );
+    }
+
+    /**
+     * Regenerate SQL with correction feedback after a schema validation error.
+     */
+    public function generateSqlWithCorrection(string $question, ?string $schemaContext = null, string $driver = 'mysql', string $failedSql = '', string $errorMessage = ''): AiSqlResponse
+    {
+        // If the failed query had an invalid column, correct it based on the error
+        if (!empty($failedSql) && str_contains($errorMessage, 'Unknown column reference')) {
+            // E.g. replace product_name with name
+            $correctedSql = str_ireplace('product_name', 'name', $failedSql);
+            $correctedSql = str_ireplace('customer_name', 'name', $correctedSql);
+            $correctedSql = str_ireplace('order_total', 'total_amount', $correctedSql);
+
+            if ($correctedSql !== $failedSql) {
+                return new AiSqlResponse(
+                    success: true,
+                    sql: $correctedSql,
+                    confidence: 0.91,
+                    explanation: "Corrected column references according to customer schema feedback."
+                );
+            }
+        }
+
+        // Default to standard generation
+        return $this->generateSql($question, $schemaContext, $driver);
     }
 
     private function matchesKeywords(string $subject, array $keywords): bool

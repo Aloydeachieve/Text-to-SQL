@@ -1,13 +1,16 @@
 import React, { useState } from 'react';
 
 interface ChartResultProps {
-  results: Array<Record<string, any>>;
+  results: Array<Record<string, unknown>>;
+  preferredType?: 'table' | 'bar' | 'line' | 'none' | null;
+  onTypeChange?: (type: 'table' | 'bar' | 'line' | 'none') => void;
 }
 
-export function ChartResult({ results }: { results: Array<Record<string, any>> }) {
+export function ChartResult({ results, preferredType, onTypeChange }: ChartResultProps) {
   const [hoveredIdx, setHoveredIdx] = useState<number | null>(null);
 
   if (!results || results.length <= 1) return null;
+  if (preferredType === 'none' || preferredType === 'table') return null;
 
   // 1. Identify columns
   const firstRow = results[0];
@@ -45,7 +48,7 @@ export function ChartResult({ results }: { results: Array<Record<string, any>> }
   // 2. Parse data
   const data = results.map(row => {
     const rawVal = row[valueKey];
-    const numVal = typeof rawVal === 'number' ? rawVal : parseFloat(rawVal) || 0;
+    const numVal = typeof rawVal === 'number' ? rawVal : typeof rawVal === 'string' ? parseFloat(rawVal) || 0 : 0;
     return {
       label: String(row[labelKey]),
       value: numVal,
@@ -58,10 +61,11 @@ export function ChartResult({ results }: { results: Array<Record<string, any>> }
   const maxVal = Math.max(...data.map(d => d.value), 1);
   const minVal = 0;
 
-  // Determine Chart Type
-  // If labels look like dates/months (e.g. YYYY-MM), default to Line Chart
+  // Determine Chart Type based on preferredType or chronological heuristics
   const isChronological = data.some(d => /^\d{4}-\d{2}$/.test(d.label) || /^\d{4}-\d{2}-\d{2}$/.test(d.label));
-  const chartType = isChronological ? 'line' : 'bar';
+  const chartType = (preferredType === 'bar' || preferredType === 'line') 
+    ? preferredType 
+    : (isChronological ? 'line' : 'bar');
 
   // SVG dimensions
   const width = 500;
@@ -89,13 +93,42 @@ export function ChartResult({ results }: { results: Array<Record<string, any>> }
 
   return (
     <div className="bg-slate-900/10 border border-slate-850 rounded-xl p-5 space-y-4">
-      <div className="flex items-center justify-between">
+      <div className="flex items-center justify-between flex-wrap gap-2">
         <h4 className="text-xs font-bold text-slate-400 uppercase tracking-wider">
           Visual Analysis: {valueKey.replace('_', ' ')} by {labelKey.replace('_', ' ')}
         </h4>
-        <span className="text-[10px] bg-blue-500/15 text-blue-400 border border-blue-500/20 rounded-full px-2 py-0.5 font-bold uppercase tracking-wide">
-          {chartType === 'line' ? 'Trend Line' : 'Distribution Bar'}
-        </span>
+        
+        <div className="flex items-center space-x-1.5 bg-slate-950/60 p-1 rounded-lg border border-slate-800/80">
+          <button
+            type="button"
+            onClick={() => onTypeChange?.('bar')}
+            className={`px-2.5 py-1 text-[11px] rounded font-medium transition-colors ${
+              chartType === 'bar'
+                ? 'bg-blue-600 text-white shadow-sm'
+                : 'text-slate-400 hover:text-white'
+            }`}
+          >
+            Bar
+          </button>
+          <button
+            type="button"
+            onClick={() => onTypeChange?.('line')}
+            className={`px-2.5 py-1 text-[11px] rounded font-medium transition-colors ${
+              chartType === 'line'
+                ? 'bg-blue-600 text-white shadow-sm'
+                : 'text-slate-400 hover:text-white'
+            }`}
+          >
+            Line
+          </button>
+          <button
+            type="button"
+            onClick={() => onTypeChange?.('table')}
+            className="px-2.5 py-1 text-[11px] rounded font-medium text-slate-400 hover:text-white transition-colors"
+          >
+            Table Only
+          </button>
+        </div>
       </div>
 
       <div className="relative h-60 w-full flex items-center justify-center">

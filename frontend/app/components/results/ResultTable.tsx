@@ -50,7 +50,7 @@ export function ResultTable({ execution }: { execution: ExecutionInfo }) {
                 {headers.map((h) => {
                   const val = row[h];
                   let renderedVal = '';
-                  if (val === null) {
+                  if (val === null || val === undefined) {
                     renderedVal = 'NULL';
                   } else if (typeof val === 'object') {
                     renderedVal = JSON.stringify(val);
@@ -61,14 +61,14 @@ export function ResultTable({ execution }: { execution: ExecutionInfo }) {
                       renderedVal = val.toString();
                     }
                   } else {
-                    renderedVal = val.toString();
+                    renderedVal = String(val);
                   }
 
                   return (
                     <td
                       key={h}
                       className={`p-3.5 ${
-                        val === null ? 'text-slate-600 italic font-mono' : 'text-slate-300 font-medium'
+                        val === null || val === undefined ? 'text-slate-600 italic font-mono' : 'text-slate-300 font-medium'
                       }`}
                     >
                       {renderedVal}
