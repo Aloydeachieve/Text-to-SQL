@@ -1,14 +1,23 @@
 import React, { useState } from 'react';
-import { TableInfo, RelationshipInfo } from '../../services/api';
+import { TableInfo, RelationshipInfo, TableClassification, SemanticMetric } from '../../services/api';
 
 interface TableSchemaProps {
   table: TableInfo;
   relationships: RelationshipInfo[];
   forceOpen?: boolean | null;
   searchFilter?: string;
+  classification?: TableClassification | null;
+  associatedMetrics?: SemanticMetric[];
 }
 
-export function TableSchema({ table, relationships, forceOpen = null, searchFilter = '' }: TableSchemaProps) {
+export function TableSchema({
+  table,
+  relationships,
+  forceOpen = null,
+  searchFilter = '',
+  classification = null,
+  associatedMetrics = [],
+}: TableSchemaProps) {
   const [userToggledOpen, setUserToggledOpen] = useState<boolean | null>(null);
 
   const queryTerm = searchFilter.trim().toLowerCase();
@@ -31,24 +40,55 @@ export function TableSchema({ table, relationships, forceOpen = null, searchFilt
       rel.to_table === table.name
   );
 
+  const getClassificationBadge = (cls: string) => {
+    switch (cls) {
+      case 'staging':
+        return 'bg-amber-500/20 text-amber-300 border-amber-500/30';
+      case 'archive':
+        return 'bg-blue-500/20 text-blue-300 border-blue-500/30';
+      case 'test':
+        return 'bg-rose-500/20 text-rose-300 border-rose-500/30';
+      case 'internal':
+        return 'bg-purple-500/20 text-purple-300 border-purple-500/30';
+      case 'business':
+        return 'bg-emerald-500/20 text-emerald-300 border-emerald-500/30';
+      default:
+        return 'bg-slate-800 text-slate-400 border-slate-700';
+    }
+  };
+
   return (
     <div className="border border-slate-850 rounded-xl overflow-hidden bg-slate-900/10 transition-all duration-200">
       <button
         onClick={() => setUserToggledOpen(!isOpen)}
         className="w-full flex items-center justify-between p-3.5 hover:bg-slate-850/30 transition-colors text-left"
       >
-        <div className="flex items-center space-x-2">
+        <div className="flex items-center space-x-2 flex-wrap gap-1">
           <span className="text-slate-400">
             <svg className="w-4 h-4 text-slate-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 10h18M3 14h18m-9-4v8m-7 0h14a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z" />
             </svg>
           </span>
-          <span className="font-semibold text-sm text-slate-200 capitalize">
+          <span className="font-semibold text-sm text-slate-200 font-mono">
             {table.name}
           </span>
           <span className="text-[10px] bg-slate-800 text-slate-400 rounded px-1.5 py-0.5 font-mono">
             {table.columns.length} cols
           </span>
+
+          {/* Table Classification Badge */}
+          {classification && (
+            <span className={`text-[10px] font-bold px-2 py-0.2 rounded-full border uppercase tracking-wider ${getClassificationBadge(classification.classification)}`}>
+              {classification.classification}
+            </span>
+          )}
+
+          {/* Preferred Source Indicator */}
+          {classification?.is_preferred_source && (
+            <span className="text-[10px] font-bold px-2 py-0.2 rounded-full bg-amber-500/20 text-amber-300 border border-amber-500/30">
+              ⭐ {classification.preferred_for_concept || 'Source of Truth'}
+            </span>
+          )}
         </div>
         <span className="text-slate-500">
           <svg
@@ -64,6 +104,29 @@ export function TableSchema({ table, relationships, forceOpen = null, searchFilt
 
       {isOpen && (
         <div className="p-4 border-t border-slate-850/50 bg-slate-900/20 space-y-3.5">
+          {/* Business Metadata Callout (if classified or associated with metrics) */}
+          {(classification?.description || associatedMetrics.length > 0) && (
+            <div className="p-3 bg-slate-950/60 rounded-xl border border-slate-800 text-xs space-y-1.5">
+              {classification?.description && (
+                <div>
+                  <span className="text-[10px] font-bold uppercase text-slate-500 block">Business Description:</span>
+                  <p className="text-slate-300">{classification.description}</p>
+                </div>
+              )}
+              {associatedMetrics.length > 0 && (
+                <div>
+                  <span className="text-[10px] font-bold uppercase text-emerald-400 block">Canonical Metrics Sourced:</span>
+                  <div className="flex flex-wrap gap-1.5 pt-0.5">
+                    {associatedMetrics.map((m) => (
+                      <span key={m.id} className="font-mono text-[10px] bg-emerald-950/60 text-emerald-300 px-2 py-0.5 rounded border border-emerald-800/40">
+                        {m.name} → {m.aggregation}({m.source_column})
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
           {/* Column Details */}
           <div className="space-y-1.5">
             <div className="flex items-center justify-between text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-2">

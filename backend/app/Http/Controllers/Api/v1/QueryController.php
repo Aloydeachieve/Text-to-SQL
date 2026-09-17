@@ -58,21 +58,22 @@ class QueryController extends Controller
     public function __invoke(Request $request): JsonResponse
     {
         $request->validate([
-            'question' => 'required|string|max:1000',
+            'question' => 'required_without:sql|nullable|string|max:1000',
             'sql' => 'nullable|string|max:2000',
             'database_connection_id' => 'nullable|integer',
             'source' => 'nullable|string|in:natural_language,custom_sql,saved_query',
         ]);
 
-        $question = $request->input('question');
         $customSql = $request->input('sql');
         $isCustomSql = !empty($customSql);
+        $question = $request->input('question') ?? ($isCustomSql ? 'Custom SQL Query' : '');
         $connId = $request->input('database_connection_id');
         $source = $request->input('source') ?? ($isCustomSql ? 'custom_sql' : 'natural_language');
 
         $user = $request->user('sanctum');
         $userId = $user?->id;
         $companyId = $user?->company_id;
+        $requestId = $request->attributes->get('request_id');
 
         // Viewers cannot execute arbitrary queries in the workspace
         if ($user && $user->isViewer()) {
@@ -84,7 +85,7 @@ class QueryController extends Controller
 
         // 0. Ambiguity Detection (Bypassed for custom SQL)
         if (!$isCustomSql) {
-            $ambiguity = $this->ambiguityService->evaluateAmbiguity($question);
+            $ambiguity = $this->ambiguityService->evaluateAmbiguity($question, $companyId);
             if ($ambiguity['ambiguous']) {
                 return response()->json([
                     'question' => $question,
@@ -144,7 +145,7 @@ class QueryController extends Controller
                 $customerSchema = $this->introspectionService->getTablesAndColumns($normalizedSchema);
 
                 // Run schema relevance selection
-                $relevanceResult = $this->relevanceService->selectRelevantSchema($question, $normalizedSchema);
+                $relevanceResult = $this->relevanceService->selectRelevantSchema($question, $normalizedSchema, $companyId);
                 $relevantSchema = $relevanceResult['schema'];
                 $schemaContext = $this->introspectionService->getPromptContext($relevantSchema);
 
@@ -181,7 +182,7 @@ class QueryController extends Controller
             $normalizedSchema = $this->defaultSchemaService->getSchemaDetails();
             $customerSchema = $this->defaultSchemaService->getTablesAndColumns();
 
-            $relevanceResult = $this->relevanceService->selectRelevantSchema($question, $normalizedSchema);
+            $relevanceResult = $this->relevanceService->selectRelevantSchema($question, $normalizedSchema, $companyId);
             $relevantSchema = $relevanceResult['schema'];
             $schemaContext = $this->introspectionService->getPromptContext($relevantSchema);
 
@@ -194,6 +195,14 @@ class QueryController extends Controller
             ];
         }
 
+        // Inject company business semantic layer intelligence into AI prompt context
+        if ($companyId) {
+            $semanticPrompt = app(\App\Services\SemanticContextService::class)->getSemanticPromptContext($question, $companyId, $relevantSchema);
+            if (!empty($semanticPrompt)) {
+                $schemaContext .= "\n" . $semanticPrompt;
+            }
+        }
+
         // 2. Generate SQL or use custom user SQL
         if ($isCustomSql) {
             $generatedSql = $customSql;
@@ -204,6 +213,7 @@ class QueryController extends Controller
 
             if (!$aiResponse->success) {
                 QueryLog::create([
+                    'request_id' => $requestId,
                     'user_id' => $userId,
                     'company_id' => $companyId,
                     'database_connection_id' => $connId,
@@ -213,6 +223,7 @@ class QueryController extends Controller
                     'passed_guardrails' => false,
                     'execution_status' => 'failed',
                     'error_message' => $aiResponse->error,
+                    'error_code' => 'AI_TRANSLATION_FAILED',
                     'confidence_score' => null
                 ]);
 
@@ -228,12 +239,14 @@ class QueryController extends Controller
                     'execution' => [
                         'success' => false,
                         'error' => $aiResponse->error,
+                        'error_code' => 'AI_TRANSLATION_FAILED',
                         'time_ms' => 0,
                         'results' => []
                     ],
                     'confidence' => null,
                     'explanation' => null,
-                    'relevant_schema' => $relevantInfo
+                    'relevant_schema' => $relevantInfo,
+                    'request_id' => $requestId,
                 ]);
             }
 
@@ -247,6 +260,7 @@ class QueryController extends Controller
 
         if (!$guardrailResult['allowed']) {
             QueryLog::create([
+                'request_id' => $requestId,
                 'user_id' => $userId,
                 'company_id' => $companyId,
                 'database_connection_id' => $connId,
@@ -256,6 +270,7 @@ class QueryController extends Controller
                 'passed_guardrails' => false,
                 'execution_status' => 'blocked',
                 'error_message' => $guardrailResult['reason'],
+                'error_code' => 'GUARDRAIL_BLOCKED',
                 'confidence_score' => $confidence
             ]);
 
@@ -271,12 +286,14 @@ class QueryController extends Controller
                 'execution' => [
                     'success' => false,
                     'error' => 'Blocked by guardrails: ' . $guardrailResult['reason'],
+                    'error_code' => 'GUARDRAIL_BLOCKED',
                     'time_ms' => 0,
                     'results' => []
                 ],
                 'confidence' => $confidence,
                 'explanation' => $explanation,
-                'relevant_schema' => $relevantInfo
+                'relevant_schema' => $relevantInfo,
+                'request_id' => $requestId,
             ]);
         }
 
@@ -311,6 +328,7 @@ class QueryController extends Controller
 
         if (!$schemaResult['valid']) {
             QueryLog::create([
+                'request_id' => $requestId,
                 'user_id' => $userId,
                 'company_id' => $companyId,
                 'database_connection_id' => $connId,
@@ -320,6 +338,7 @@ class QueryController extends Controller
                 'passed_guardrails' => true,
                 'execution_status' => 'failed',
                 'error_message' => 'Schema validation failed: ' . $schemaResult['reason'],
+                'error_code' => 'SCHEMA_VALIDATION_FAILED',
                 'confidence_score' => $confidence
             ]);
 
@@ -338,22 +357,25 @@ class QueryController extends Controller
                 'execution' => [
                     'success' => false,
                     'error' => 'Schema validation failed: ' . $schemaResult['reason'],
+                    'error_code' => 'SCHEMA_VALIDATION_FAILED',
                     'time_ms' => 0,
                     'results' => []
                 ],
                 'confidence' => $confidence,
                 'explanation' => $explanation,
-                'relevant_schema' => $relevantInfo
+                'relevant_schema' => $relevantInfo,
+                'request_id' => $requestId,
             ]);
         }
 
         // 5. Semantic Validation & Query Interpretation
         $semanticResult = null;
         if (!$isCustomSql) {
-            $semanticResult = $this->semanticValidator->validate($question, $generatedSql, $schemaContext, $customerSchema, $driver, $normalizedSchema);
+            $semanticResult = $this->semanticValidator->validate($question, $generatedSql, $schemaContext, $customerSchema, $driver, $normalizedSchema, $companyId);
 
             if (!$semanticResult['valid']) {
                 QueryLog::create([
+                    'request_id' => $requestId,
                     'user_id' => $userId,
                     'company_id' => $companyId,
                     'database_connection_id' => $connId,
@@ -363,6 +385,8 @@ class QueryController extends Controller
                     'passed_guardrails' => true,
                     'execution_status' => 'blocked',
                     'error_message' => 'Semantic validation failed: ' . $semanticResult['reason'],
+                    'error_code' => 'SEMANTIC_VALIDATION_BLOCKED',
+                    'risk_level' => $semanticResult['risk_level'] ?? 'low',
                     'confidence_score' => $confidence
                 ]);
 
@@ -381,23 +405,21 @@ class QueryController extends Controller
                     'execution' => [
                         'success' => false,
                         'error' => 'Blocked by semantic intent verification: ' . $semanticResult['reason'],
+                        'error_code' => 'SEMANTIC_VALIDATION_BLOCKED',
                         'time_ms' => 0,
                         'results' => []
                     ],
                     'confidence' => $confidence,
                     'explanation' => $explanation,
-                    'relevant_schema' => $relevantInfo
+                    'relevant_schema' => $relevantInfo,
+                    'request_id' => $requestId,
                 ]);
             }
         } else {
-            // For custom SQL, extract query interpretation, joins, grain, and potential multiplication risk
+            // For custom SQL, extract query interpretation, joins, grain, and potential multiplication risk + business semantics
             $interpretation = app(\App\Services\QueryInterpretationService::class)->interpret($generatedSql, $normalizedSchema);
             $structure = $this->semanticValidator->extractStructure($generatedSql);
-            $semanticResult = [
-                'valid' => true,
-                'score' => 1.0,
-                'reason' => null,
-                'interpretation' => 'Custom SQL query targeting ' . implode(', ', $interpretation['tables']),
+            $baseCustomDetails = [
                 'tables' => $interpretation['tables'],
                 'operations' => $structure['operations'],
                 'filters' => $interpretation['filters'],
@@ -407,7 +429,27 @@ class QueryController extends Controller
                 'grain' => $interpretation['grain'],
                 'aggregations' => $interpretation['aggregations'],
                 'multiplication_risk' => $interpretation['multiplication_risk'],
+                'risk_level' => $interpretation['risk_level'] ?? 'low',
+                'risk_reasons' => $interpretation['risk_reasons'] ?? [],
             ];
+            $semantics = $this->semanticValidator->evaluateBusinessSemantics($question, $generatedSql, $baseCustomDetails, $companyId);
+
+            $semanticResult = array_merge([
+                'valid' => true,
+                'score' => 1.0,
+                'reason' => null,
+                'interpretation' => 'Custom SQL query targeting ' . implode(', ', $interpretation['tables']),
+                'semantic_intelligence' => $semantics,
+                'metric' => $semantics['metric'],
+                'metric_id' => $semantics['metric_id'],
+                'metric_source' => $semantics['metric_source'],
+                'metric_column' => $semantics['metric_column'],
+                'aggregation' => $semantics['aggregation'],
+                'required_filters' => $semantics['required_filters'],
+                'source_of_truth' => $semantics['source_of_truth'],
+                'semantic_confidence' => $semantics['confidence'],
+                'semantic_warnings' => $semantics['semantic_warnings'],
+            ], $baseCustomDetails);
         }
 
         // 6. Safe Read-Only Execution with Guaranteed Connection Cleanup
@@ -423,8 +465,15 @@ class QueryController extends Controller
             }
         }
 
+        $riskLevel = $semanticResult['risk_level'] ?? 'low';
+        $riskReasons = $semanticResult['risk_reasons'] ?? [];
+        $rowsReturned = $executionResult['returned_rows'] ?? (is_array($executionResult['results'] ?? null) ? count($executionResult['results']) : 0);
+        $truncated = $executionResult['truncated'] ?? false;
+        $errorCode = $executionResult['error_code'] ?? null;
+
         // 7. Tenant-safe Audit Logging
         QueryLog::create([
+            'request_id' => $requestId,
             'user_id' => $userId,
             'company_id' => $companyId,
             'database_connection_id' => $connId,
@@ -434,7 +483,11 @@ class QueryController extends Controller
             'passed_guardrails' => true,
             'execution_status' => $executionResult['success'] ? 'success' : 'failed',
             'execution_time_ms' => $executionResult['time_ms'],
+            'rows_returned' => $rowsReturned,
+            'truncated' => $truncated,
+            'risk_level' => $riskLevel,
             'error_message' => $executionResult['error'],
+            'error_code' => $errorCode,
             'confidence_score' => $confidence
         ]);
 
@@ -453,12 +506,20 @@ class QueryController extends Controller
             'execution' => [
                 'success' => $executionResult['success'],
                 'error' => $executionResult['error'],
+                'error_code' => $errorCode,
                 'time_ms' => $executionResult['time_ms'],
-                'results' => $executionResult['results']
+                'results' => $executionResult['results'],
+                'truncated' => $truncated,
+                'returned_rows' => $rowsReturned,
+                'limit' => $executionResult['limit'] ?? config('reliability.query_max_rows', 1000),
+                'total_rows' => $executionResult['total_rows'] ?? $rowsReturned,
             ],
+            'risk_level' => $riskLevel,
+            'risk_reasons' => $riskReasons,
             'confidence' => $confidence,
             'explanation' => $explanation,
-            'relevant_schema' => $relevantInfo
+            'relevant_schema' => $relevantInfo,
+            'request_id' => $requestId,
         ]);
     }
 }

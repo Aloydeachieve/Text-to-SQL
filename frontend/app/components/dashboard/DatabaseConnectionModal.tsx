@@ -2,6 +2,7 @@ import React, { useState, useEffect, useCallback } from 'react';
 import {
   AuthUser,
   DatabaseConnectionItem,
+  DatabaseConnectionHealth,
   SchemaDetails,
   loginTenant,
   registerTenant,
@@ -11,6 +12,7 @@ import {
   saveDatabaseConnection,
   deleteDatabaseConnection,
   fetchConnectionSchema,
+  checkDatabaseConnectionHealth,
 } from '../../services/api';
 
 interface DatabaseConnectionModalProps {
@@ -35,9 +37,11 @@ export function DatabaseConnectionModal({
   const [authLoading, setAuthLoading] = useState(false);
   const [authError, setAuthError] = useState<string | null>(null);
 
-  // Connection list state
+  // Connection management state
   const [connections, setConnections] = useState<DatabaseConnectionItem[]>([]);
   const [isLoadingConnections, setIsLoadingConnections] = useState(false);
+  const [healthResults, setHealthResults] = useState<Record<number, DatabaseConnectionHealth>>({});
+  const [checkingHealthId, setCheckingHealthId] = useState<number | null>(null);
   const [selectedConnectionSchema, setSelectedConnectionSchema] = useState<{
     connection: DatabaseConnectionItem;
     schema: SchemaDetails;
@@ -246,6 +250,31 @@ export function DatabaseConnectionModal({
     onUserChanged(null);
     setConnections([]);
     setSelectedConnectionSchema(null);
+  };
+
+  const handleCheckHealth = async (connId: number) => {
+    setCheckingHealthId(connId);
+    try {
+      const health = await checkDatabaseConnectionHealth(connId);
+      setHealthResults((prev) => ({ ...prev, [connId]: health }));
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Health check probe failed.';
+      setHealthResults((prev) => ({
+        ...prev,
+        [connId]: {
+          id: connId,
+          name: '',
+          driver: 'mysql',
+          healthy: false,
+          status: 'unhealthy',
+          latency_ms: 0,
+          message: msg,
+          timestamp: new Date().toISOString(),
+        },
+      }));
+    } finally {
+      setCheckingHealthId(null);
+    }
   };
 
   if (!isOpen) return null;
@@ -605,59 +634,100 @@ export function DatabaseConnectionModal({
                   {connections.map((conn) => (
                     <div
                       key={conn.id}
-                      className="p-4 bg-slate-950/40 border border-slate-800/80 rounded-xl flex items-center justify-between hover:border-slate-700 transition-colors"
+                      className="p-4 bg-slate-950/40 border border-slate-800/80 rounded-xl space-y-2.5 hover:border-slate-700 transition-colors"
                     >
-                      <div className="flex items-center space-x-3.5">
-                        <div className={`w-9 h-9 rounded-xl flex items-center justify-center font-mono font-bold text-xs uppercase ${
-                          conn.driver === 'mysql'
-                            ? 'bg-blue-950/50 text-blue-400 border border-blue-800/40'
-                            : 'bg-indigo-950/50 text-indigo-400 border border-indigo-800/40'
+                      <div className="flex items-center justify-between">
+                        <div className="flex items-center space-x-3.5">
+                          <div className={`w-9 h-9 rounded-xl flex items-center justify-center font-mono font-bold text-xs uppercase ${
+                            conn.driver === 'mysql'
+                              ? 'bg-blue-950/50 text-blue-400 border border-blue-800/40'
+                              : 'bg-indigo-950/50 text-indigo-400 border border-indigo-800/40'
+                          }`}>
+                            {conn.driver === 'mysql' ? 'MY' : 'PG'}
+                          </div>
+
+                          <div>
+                            <div className="flex items-center space-x-2">
+                              <h4 className="text-xs font-semibold text-white">{conn.name}</h4>
+                              <span className={`text-[10px] px-2 py-0.5 rounded-full uppercase tracking-wider font-semibold ${
+                                conn.status === 'connected'
+                                  ? 'bg-emerald-950/60 text-emerald-400 border border-emerald-800/50'
+                                  : conn.status === 'failed'
+                                  ? 'bg-red-950/60 text-red-400 border border-red-800/50'
+                                  : 'bg-amber-950/60 text-amber-400 border border-amber-800/50'
+                              }`}>
+                                {conn.status}
+                              </span>
+                            </div>
+
+                            <div className="text-[11px] text-slate-400 flex items-center space-x-3 mt-0.5 font-mono">
+                              <span>{conn.username}@{conn.host}:{conn.port}/{conn.database}</span>
+                              {conn.last_tested_at && (
+                                <span className="text-slate-500">Probe: {new Date(conn.last_tested_at).toLocaleTimeString()}</span>
+                              )}
+                            </div>
+                          </div>
+                        </div>
+
+                        <div className="flex items-center space-x-2">
+                          <button
+                            type="button"
+                            onClick={() => handleCheckHealth(conn.id)}
+                            disabled={checkingHealthId === conn.id}
+                            className="px-3 py-1.5 bg-slate-900 hover:bg-slate-800 text-emerald-400 rounded-lg text-xs font-medium border border-slate-800 hover:border-emerald-900/40 transition-colors flex items-center gap-1.5"
+                            title="Probe live connection health & ping latency"
+                          >
+                            <span className={`w-2 h-2 rounded-full ${
+                              checkingHealthId === conn.id
+                                ? 'bg-amber-400 animate-ping'
+                                : healthResults[conn.id]?.healthy
+                                ? 'bg-emerald-400'
+                                : healthResults[conn.id]
+                                ? 'bg-rose-400'
+                                : 'bg-slate-500'
+                            }`} />
+                            {checkingHealthId === conn.id
+                              ? 'Probing...'
+                              : healthResults[conn.id]
+                              ? `${healthResults[conn.id].status === 'healthy' ? 'Healthy' : healthResults[conn.id].status} (${healthResults[conn.id].latency_ms}ms)`
+                              : 'Check Health'}
+                          </button>
+
+                          <button
+                            onClick={() => handleViewSchema(conn)}
+                            disabled={schemaLoadingId === conn.id}
+                            className="px-3 py-1.5 bg-slate-900 hover:bg-slate-800 text-blue-400 rounded-lg text-xs font-medium border border-slate-800 hover:border-blue-900/40 transition-colors"
+                          >
+                            {schemaLoadingId === conn.id ? 'Introspecting...' : 'View Schema'}
+                          </button>
+
+                          <button
+                            onClick={() => handleDeleteConnection(conn.id, conn.name)}
+                            className="p-1.5 text-slate-500 hover:text-red-400 rounded-lg hover:bg-slate-900 transition-colors"
+                            title="Delete Connection"
+                          >
+                            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                            </svg>
+                          </button>
+                        </div>
+                      </div>
+
+                      {healthResults[conn.id] && (
+                        <div className={`text-[11px] px-3 py-1.5 rounded-lg flex items-center justify-between font-mono ${
+                          healthResults[conn.id].healthy
+                            ? 'bg-emerald-950/30 text-emerald-300 border border-emerald-500/20'
+                            : 'bg-rose-950/30 text-rose-300 border border-rose-500/20'
                         }`}>
-                          {conn.driver === 'mysql' ? 'MY' : 'PG'}
+                          <span className="flex items-center gap-1.5">
+                            <span>{healthResults[conn.id].healthy ? '✓' : '⚠'}</span>
+                            <span>{healthResults[conn.id].message}</span>
+                          </span>
+                          <span className="text-slate-500 text-[10px]">
+                            {new Date(healthResults[conn.id].timestamp).toLocaleTimeString()}
+                          </span>
                         </div>
-
-                        <div>
-                          <div className="flex items-center space-x-2">
-                            <h4 className="text-xs font-semibold text-white">{conn.name}</h4>
-                            <span className={`text-[10px] px-2 py-0.5 rounded-full uppercase tracking-wider font-semibold ${
-                              conn.status === 'connected'
-                                ? 'bg-emerald-950/60 text-emerald-400 border border-emerald-800/50'
-                                : conn.status === 'failed'
-                                ? 'bg-red-950/60 text-red-400 border border-red-800/50'
-                                : 'bg-amber-950/60 text-amber-400 border border-amber-800/50'
-                            }`}>
-                              {conn.status}
-                            </span>
-                          </div>
-
-                          <div className="text-[11px] text-slate-400 flex items-center space-x-3 mt-0.5 font-mono">
-                            <span>{conn.username}@{conn.host}:{conn.port}/{conn.database}</span>
-                            {conn.last_tested_at && (
-                              <span className="text-slate-500">Probe: {new Date(conn.last_tested_at).toLocaleTimeString()}</span>
-                            )}
-                          </div>
-                        </div>
-                      </div>
-
-                      <div className="flex items-center space-x-2">
-                        <button
-                          onClick={() => handleViewSchema(conn)}
-                          disabled={schemaLoadingId === conn.id}
-                          className="px-3 py-1.5 bg-slate-900 hover:bg-slate-800 text-blue-400 rounded-lg text-xs font-medium border border-slate-800 hover:border-blue-900/40 transition-colors"
-                        >
-                          {schemaLoadingId === conn.id ? 'Introspecting...' : 'View Schema'}
-                        </button>
-
-                        <button
-                          onClick={() => handleDeleteConnection(conn.id, conn.name)}
-                          className="p-1.5 text-slate-500 hover:text-red-400 rounded-lg hover:bg-slate-900 transition-colors"
-                          title="Delete Connection"
-                        >
-                          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-                          </svg>
-                        </button>
-                      </div>
+                      )}
                     </div>
                   ))}
                 </div>

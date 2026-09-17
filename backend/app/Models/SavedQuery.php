@@ -15,6 +15,8 @@ class SavedQuery extends Model
         'company_id',
         'user_id',
         'database_connection_id',
+        'metric_id',
+        'semantic_snapshot',
         'target_database_name',
         'is_demo',
         'visibility',
@@ -30,6 +32,7 @@ class SavedQuery extends Model
     {
         return [
             'is_demo' => 'boolean',
+            'semantic_snapshot' => 'array',
             'created_at' => 'datetime',
             'updated_at' => 'datetime',
         ];
@@ -123,5 +126,13 @@ class SavedQuery extends Model
     public function dashboardWidgets(): HasMany
     {
         return $this->hasMany(DashboardWidget::class);
+    }
+
+    /**
+     * Semantic metric linked to this saved query.
+     */
+    public function metric(): BelongsTo
+    {
+        return $this->belongsTo(SemanticMetric::class, 'metric_id');
     }
 }

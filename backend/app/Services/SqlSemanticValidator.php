@@ -59,7 +59,8 @@ class SqlSemanticValidator
         ?string $schemaContext = null,
         ?array $schema = null,
         string $driver = 'mysql',
-        ?array $schemaDetails = null
+        ?array $schemaDetails = null,
+        ?int $companyId = null
     ): array {
         $normalizedSql = trim($sql);
         $schemaDetails = $schemaDetails ?? $this->schemaService->getSchemaDetails();
@@ -76,7 +77,24 @@ class SqlSemanticValidator
             'grain' => $interpretationData['grain'],
             'aggregations' => $interpretationData['aggregations'],
             'multiplication_risk' => $interpretationData['multiplication_risk'],
+            'risk_level' => $interpretationData['risk_level'] ?? 'low',
+            'risk_reasons' => $interpretationData['risk_reasons'] ?? [],
         ];
+
+        // Evaluate Phase 9 business semantic intelligence & table classifications
+        $semantics = $this->evaluateBusinessSemantics($question, $normalizedSql, $baseDetails, $companyId);
+        $baseDetails = array_merge($baseDetails, [
+            'semantic_intelligence' => $semantics,
+            'metric' => $semantics['metric'],
+            'metric_id' => $semantics['metric_id'],
+            'metric_source' => $semantics['metric_source'],
+            'metric_column' => $semantics['metric_column'],
+            'aggregation' => $semantics['aggregation'],
+            'required_filters' => $semantics['required_filters'],
+            'source_of_truth' => $semantics['source_of_truth'],
+            'semantic_confidence' => $semantics['confidence'],
+            'semantic_warnings' => $semantics['semantic_warnings'],
+        ]);
 
         // 1. Run deterministic checks to detect clear intent mismatches or well-known query patterns
         $deterministicResult = $this->evaluateDeterministicIntent($question, $normalizedSql, $structure, $schema);
@@ -376,5 +394,185 @@ class SqlSemanticValidator
         }
 
         return null;
+    }
+
+    /**
+     * Evaluate company semantic metric compliance and table classification warnings.
+     *
+     * @param string $question
+     * @param string $sql
+     * @param array $details
+     * @param int|null $companyId
+     * @return array{
+     *     metric: ?string,
+     *     metric_id: ?int,
+     *     metric_source: ?string,
+     *     metric_column: ?string,
+     *     aggregation: ?string,
+     *     required_filters: list<string>,
+     *     source_of_truth: bool,
+     *     confidence: 'HIGH'|'MEDIUM'|'LOW',
+     *     semantic_warnings: list<array{type: string, severity: 'warning'|'info'|'critical', table?: string, message: string, suggestion?: string}>
+     * }
+     */
+    public function evaluateBusinessSemantics(
+        string $question,
+        string $sql,
+        array $details,
+        ?int $companyId = null
+    ): array {
+        $result = [
+            'metric' => null,
+            'metric_id' => null,
+            'metric_source' => null,
+            'metric_column' => null,
+            'aggregation' => null,
+            'required_filters' => [],
+            'source_of_truth' => false,
+            'confidence' => 'HIGH',
+            'semantic_warnings' => [],
+        ];
+
+        if (!$companyId) {
+            return $result;
+        }
+
+        try {
+            $semanticService = app(\App\Services\SemanticContextService::class);
+            $classifications = $semanticService->getTableClassifications($companyId);
+            $metrics = $semanticService->findRelevantMetrics($question, $companyId);
+            $tablesInQuery = array_map('strtolower', $details['tables'] ?? []);
+
+            // 1. Check Table Classifications for warnings
+            foreach ($tablesInQuery as $tableName) {
+                if (isset($classifications[$tableName])) {
+                    $info = $classifications[$tableName];
+                    $class = strtolower($info['classification'] ?? 'business');
+
+                    if ($class === 'staging') {
+                        $result['semantic_warnings'][] = [
+                            'type' => 'staging_source_warning',
+                            'severity' => 'warning',
+                            'table' => $tableName,
+                            'message' => "Table '{$tableName}' is classified as [staging]. Data may be unverified, incomplete, or temporary.",
+                            'suggestion' => "Verify if production business tables should be queried instead.",
+                        ];
+                        $result['confidence'] = 'MEDIUM';
+                    } elseif ($class === 'archive') {
+                        $result['semantic_warnings'][] = [
+                            'type' => 'archive_source_warning',
+                            'severity' => 'warning',
+                            'table' => $tableName,
+                            'message' => "Table '{$tableName}' is classified as [archive]. Data reflects historical records and may not be current.",
+                            'suggestion' => "Ensure historical analysis was intended.",
+                        ];
+                        $result['confidence'] = 'MEDIUM';
+                    } elseif ($class === 'test') {
+                        $result['semantic_warnings'][] = [
+                            'type' => 'test_source_warning',
+                            'severity' => 'critical',
+                            'table' => $tableName,
+                            'message' => "Table '{$tableName}' is classified as [test]. Results do not represent genuine business operations.",
+                            'suggestion' => "Do not use test tables for official reporting.",
+                        ];
+                        $result['confidence'] = 'LOW';
+                    }
+                }
+            }
+
+            // 2. Business Metric Matching & Verification
+            if ($metrics->isNotEmpty()) {
+                $metric = $metrics->first();
+                $result['metric'] = $metric->name;
+                $result['metric_id'] = $metric->id;
+                $result['metric_source'] = $metric->source_table;
+                $result['metric_column'] = $metric->source_column;
+                $result['aggregation'] = $metric->aggregation;
+                $result['source_of_truth'] = (bool)$metric->is_source_of_truth;
+
+                if (!empty($metric->filter_condition)) {
+                    $result['required_filters'][] = $metric->filter_condition;
+                }
+
+                $sourceTableLower = strtolower($metric->source_table);
+                $sourceColLower = strtolower($metric->source_column);
+                $sqlLower = strtolower($sql);
+
+                // A) Check source table compliance
+                if (!in_array($sourceTableLower, $tablesInQuery, true)) {
+                    $result['semantic_warnings'][] = [
+                        'type' => 'metric_source_mismatch',
+                        'severity' => 'warning',
+                        'message' => "Business metric '{$metric->name}' canonically originates from table '{$metric->source_table}', but the query targets [" . implode(', ', $tablesInQuery) . "].",
+                        'suggestion' => "Update query to source from '{$metric->source_table}'.",
+                    ];
+                    $result['confidence'] = 'MEDIUM';
+                    $result['source_of_truth'] = false;
+                }
+
+                // B) Check source column compliance
+                if (!str_contains($sqlLower, $sourceColLower)) {
+                    $result['semantic_warnings'][] = [
+                        'type' => 'metric_column_mismatch',
+                        'severity' => 'warning',
+                        'message' => "Business metric '{$metric->name}' is defined on column '{$metric->source_column}', but this column is not referenced in the query.",
+                        'suggestion' => "Ensure '{$metric->source_column}' is used for calculation.",
+                    ];
+                    $result['confidence'] = 'MEDIUM';
+                    $result['source_of_truth'] = false;
+                }
+
+                // C) Check aggregation compliance
+                $requiredAgg = strtoupper($metric->aggregation ?? 'SUM');
+                if ($requiredAgg !== 'NONE') {
+                    $hasAgg = in_array($requiredAgg, array_map('strtoupper', $details['operations'] ?? []), true)
+                        || collect($details['aggregations'] ?? [])->contains(fn($agg) => str_starts_with(strtoupper($agg), "{$requiredAgg}(") || str_contains(strtoupper($agg), "{$requiredAgg}("))
+                        || (bool)preg_match('/\b' . preg_quote($requiredAgg, '/') . '\s*\(/i', $sql);
+
+                    if (!$hasAgg) {
+                        $result['semantic_warnings'][] = [
+                            'type' => 'aggregation_mismatch',
+                            'severity' => 'warning',
+                            'message' => "Business metric '{$metric->name}' requires aggregation {$requiredAgg}(), but query does not use it.",
+                            'suggestion' => "Use {$requiredAgg}() aggregation function.",
+                        ];
+                        $result['confidence'] = 'MEDIUM';
+                    }
+                }
+
+                // D) Check required filter compliance
+                if (!empty($metric->filter_condition)) {
+                    $cleanFilter = preg_replace('/[^a-z0-9_]+/i', ' ', strtolower($metric->filter_condition));
+                    $filterWords = array_filter(explode(' ', $cleanFilter));
+                    $allWordsPresent = true;
+                    foreach ($filterWords as $word) {
+                        if (strlen($word) >= 2 && !str_contains($sqlLower, $word)) {
+                            $allWordsPresent = false;
+                            break;
+                        }
+                    }
+
+                    if (!$allWordsPresent) {
+                        $result['semantic_warnings'][] = [
+                            'type' => 'required_filter_missing',
+                            'severity' => 'warning',
+                            'message' => "Business metric '{$metric->name}' requires filter condition: \"{$metric->filter_condition}\", which was not detected in the WHERE clause.",
+                            'suggestion' => "Add \"WHERE {$metric->filter_condition}\" to ensure metric accuracy.",
+                        ];
+                        $result['confidence'] = 'MEDIUM';
+                        $result['source_of_truth'] = false;
+                    }
+                }
+            }
+
+            $hasCritical = collect($result['semantic_warnings'])->contains('severity', 'critical');
+            if ($hasCritical) {
+                $result['confidence'] = 'LOW';
+            }
+        } catch (\Throwable $e) {
+            // Fail gracefully on error
+        }
+
+        return $result;
     }
 }

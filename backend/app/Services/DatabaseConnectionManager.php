@@ -123,6 +123,89 @@ class DatabaseConnectionManager
     }
 
     /**
+     * Probe customer database connection health and return latency & status.
+     *
+     * @param DatabaseConnection $databaseConnection
+     * @return array{status: string, latency_ms: float, message: string, last_checked_at: string}
+     */
+    public function checkHealth(DatabaseConnection $databaseConnection): array
+    {
+        $tempConnectionName = 'tenant_health_' . bin2hex(random_bytes(6));
+        $probeTimeout = (int) config('reliability.health_probe_timeout_seconds', 3);
+
+        $startTime = microtime(true);
+
+        try {
+            $config = [
+                'driver' => $databaseConnection->driver,
+                'host' => $databaseConnection->host,
+                'port' => $databaseConnection->port,
+                'database' => $databaseConnection->database,
+                'username' => $databaseConnection->username,
+                'password' => $databaseConnection->password,
+            ];
+
+            $this->registerRuntimeConnection($tempConnectionName, $config, $probeTimeout);
+
+            $connection = DB::connection($tempConnectionName);
+            $connection->getPdo();
+            $connection->select('SELECT 1 AS ping');
+
+            $latencyMs = round((microtime(true) - $startTime) * 1000, 2);
+
+            $databaseConnection->update([
+                'status' => 'connected',
+                'last_tested_at' => now(),
+            ]);
+
+            return [
+                'status' => 'healthy',
+                'latency_ms' => $latencyMs,
+                'message' => 'Connection operational.',
+                'last_checked_at' => now()->toIso8601String(),
+            ];
+        } catch (Throwable $e) {
+            $latencyMs = round((microtime(true) - $startTime) * 1000, 2);
+            $errorMsg = strtolower($e->getMessage());
+
+            $status = 'unhealthy';
+            $safeMessage = 'Unable to connect to customer database.';
+
+            if (str_contains($errorMsg, 'timed out') || str_contains($errorMsg, 'timeout') || $e->getCode() == 2002) {
+                $status = 'timeout';
+                $safeMessage = 'Database connection timed out during health probe.';
+            } elseif (str_contains($errorMsg, 'access denied') || str_contains($errorMsg, 'authentication failed') || $e->getCode() == 1045) {
+                $status = 'authentication_failed';
+                $safeMessage = 'Database authentication failed with configured credentials.';
+            } elseif (str_contains($errorMsg, 'unknown database') || str_contains($errorMsg, 'does not exist')) {
+                $status = 'unavailable';
+                $safeMessage = 'Target database schema is unavailable or does not exist.';
+            }
+
+            Log::warning('Customer database health probe failed', [
+                'connection_id' => $databaseConnection->id,
+                'company_id' => $databaseConnection->company_id,
+                'status' => $status,
+                'error' => $e->getMessage(),
+            ]);
+
+            $databaseConnection->update([
+                'status' => 'failed',
+                'last_tested_at' => now(),
+            ]);
+
+            return [
+                'status' => $status,
+                'latency_ms' => $latencyMs,
+                'message' => $safeMessage,
+                'last_checked_at' => now()->toIso8601String(),
+            ];
+        } finally {
+            $this->purgeConnection($tempConnectionName);
+        }
+    }
+
+    /**
      * Generate an isolated connection identifier for a tenant's database connection.
      */
     public function getConnectionName(DatabaseConnection $databaseConnection): string
@@ -133,9 +216,10 @@ class DatabaseConnectionManager
     /**
      * Register a runtime database connection configuration into Laravel's config repository.
      */
-    protected function registerRuntimeConnection(string $connectionName, array $config): void
+    protected function registerRuntimeConnection(string $connectionName, array $config, ?int $timeout = null): void
     {
         $driver = strtolower($config['driver'] ?? 'mysql');
+        $connTimeout = $timeout ?? (int) config('reliability.query_timeout_seconds', 10);
 
         if ($driver === 'mysql') {
             Config::set("database.connections.{$connectionName}", [
@@ -151,7 +235,7 @@ class DatabaseConnectionManager
                 'strict' => true,
                 'engine' => null,
                 'options' => [
-                    PDO::ATTR_TIMEOUT => 5,
+                    PDO::ATTR_TIMEOUT => $connTimeout,
                     PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
                 ],
             ]);
@@ -168,7 +252,7 @@ class DatabaseConnectionManager
                 'search_path' => 'public',
                 'sslmode' => 'prefer',
                 'options' => [
-                    PDO::ATTR_TIMEOUT => 5,
+                    PDO::ATTR_TIMEOUT => $connTimeout,
                     PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
                 ],
             ]);

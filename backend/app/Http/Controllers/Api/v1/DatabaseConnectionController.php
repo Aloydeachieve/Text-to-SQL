@@ -231,4 +231,41 @@ class DatabaseConnectionController extends Controller
             ], 500);
         }
     }
+
+    /**
+     * Check health and latency of an authorized company connection.
+     */
+    public function health(Request $request, int $id): JsonResponse
+    {
+        if ($request->user()->isViewer()) {
+            return response()->json([
+                'success' => false,
+                'message' => 'You do not have permission to perform this action.',
+            ], 403);
+        }
+
+        $companyId = $request->user()->company_id;
+
+        $connection = DatabaseConnection::where('company_id', $companyId)
+            ->where('id', $id)
+            ->first();
+
+        if (!$connection) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Database connection not found or unauthorized.',
+            ], 404);
+        }
+
+        $healthResult = $this->connectionManager->checkHealth($connection);
+
+        return response()->json([
+            'success' => true,
+            'data' => array_merge([
+                'id' => $connection->id,
+                'name' => $connection->name,
+                'driver' => $connection->driver,
+            ], $healthResult),
+        ]);
+    }
 }

@@ -1,382 +1,474 @@
-# Text-to-SQL Interface with Guardrails
+# Text-to-SQL Analytics Platform
 
-A portfolio-grade, full-stack AI engineering application that translates natural language business questions into SQL queries, executes them safely against a MySQL database using a rigorous security guardrail and schema validation pipeline, and renders interactive visualizations.
-
----
-
-## 🌟 Engineering Value & Portfolio Readiness
-
-This is not a simple wrapper around an LLM API. It demonstrates a production-hardened, secure, and resilient system pattern for exposing relational database assets to generative AI:
-
-1. **LLM Output Structuring**: Enforces strict JSON schemas on generative completions (`sql`, `confidence`, `explanation`) using Gemini 1.5-flash options.
-2. **Multi-Stage Security Gateways**: Separates query generation from query validation. AI outputs and user-edited queries must pass through independent validation layers *before* touching the database.
-3. **Database-Aware Validation**: Inspects queries statically to verify referenced tables and columns exist, preventing syntax exception leakage and database crashes.
-4. **Resiliency and Timeouts**: Connect timeouts (5s) and request timeouts (10s) prevent server connection exhaustion. Raw database trace exceptions are caught and generalized in production environments.
-5. **Interactive Workspaces**: Allows developers/analysts to edit, re-validate, and re-execute queries while maintaining 100% of the guardrail protection.
-6. **Zero-Dependency SVG Visualizations**: Dynamically checks results to render SVG-based distribution bars and chronological trend lines with tooltips, fully compatible with React 19 / Next.js 15.
+> **Enterprise-grade, multi-tenant Text-to-SQL SaaS built around one central engineering challenge: *"Can we trust the answer?"***
+> Combines dialect-aware LLM SQL generation with AST guardrails, dynamic schema intelligence, company-scoped business semantic modeling, relational grain/fan-out analysis, read-only isolated execution, and end-to-end production observability.
 
 ---
 
-## 🛡️ Why Text-to-SQL Needs Guardrails
+## 🌟 Why This Project Is Interesting
 
-Generative AI models are prone to hallucination, formatting variations, and instruction-drift. Letting an AI write and execute SQL against an database without guardrails exposes systems to:
-- **Destructive Statements**: An AI might translate a prompt into a `DROP TABLE`, `TRUNCATE`, or `DELETE` statement.
-- **SQL Injections**: A user could inject a prompt designed to append malicious subqueries (e.g. `'; DROP TABLE users--`).
-- **Schema Conflicts**: Hallucinated table/column names cause database connection exceptions, which can expose structural names or paths to the frontend.
-- **Denial of Service (DoS)**: Inefficient or massive Cartesian joins can lock up CPU and memory.
+Most Text-to-SQL demonstrations are brittle LLM wrappers: they send an ambiguous user prompt to an AI model, inject a raw table schema, and execute whatever SQL string is returned directly against a production database.
 
-Our **Security Pipeline** prevents this by validating queries at the string, token, and database levels.
+In business environments, this approach fails catastrophically:
+- **It generates dangerous SQL**: Statements can drop tables, overwrite records, or exfiltrate private credentials.
+- **It generates *valid* SQL that produces the *wrong business answer***: An unconstrained `SELECT SUM(amount) FROM payments` succeeds without error, yet reports inaccurate corporate revenue because failed, pending, and refunded transactions were never filtered out.
+- **It falls into join & fan-out multiplication traps (Chasm Trap)**: Joining 1:N parent-child relations (e.g. `orders` to `order_items`) multiplies parent totals across child records, silently inflating financial metrics by orders of magnitude.
+- **It queries the wrong data sources**: Staging tables, pre-ingestion tables, or historical archive tables are selected instead of canonical production sources.
+- **It creates operational downtime**: Unbounded queries without `LIMIT` clauses or execution timeouts crash customer databases and exhaust application memory.
+
+This platform solves these problems through a **defense-in-depth, 8-layer validation and execution pipeline**. Every query is verified for syntax safety, dialect-specific schema validity, business metric alignment, query grain compatibility, and tenant data isolation before a single byte of data is queried.
 
 ---
 
-## 📊 Technical Architecture & System Pipelines
+## 🛡️ The Problem: Why Vanilla Text-to-SQL Is Insufficient
+
+| Real-World Failure Mode | Vanilla LLM Text-to-SQL | This Platform's Defense |
+| :--- | :--- | :--- |
+| **Destructive Commands** | Translates prompt to `DROP`, `DELETE`, or `TRUNCATE` | **AST SQL Guardrails**: Strips string literals and blocks all non-`SELECT` statements before execution. |
+| **Hallucinated Schema** | Hallucinates column/table names, leaking PDO error stacks | **Dynamic Schema Validation**: Validates all AST-referenced identifiers against verified database metadata. |
+| **Silent Metric Drift** | Computes `SUM(amount)` ignoring business filters (`WHERE status = 'completed'`) | **Semantic Metric Validation**: Compares query AST against company-defined canonical metrics and flags missing filters. |
+| **Fan-Out Multiplication** | Computes `SUM(orders.total)` joined to `order_items`, multiplying amounts | **Relational Grain & Fan-Out Analysis**: Computes output grain and warns users when 1:N joins inflate parent metrics. |
+| **Staging/Archive Contamination** | Queries `staging_orders` or `archive_payments` | **Table Governance & Classifications**: Flags queries touching staging or archive data sources. |
+| **Unbounded Query DoS** | Executes `SELECT *` across millions of rows, locking the DB | **Driver Session Timeouts & Row Caps**: Enforces driver-level session timeouts and caps output at 1,000 rows. |
+| **Tenant Data Cross-Talk** | Queries run against the SaaS platform DB or other tenants | **Strict Isolation**: Customer queries run strictly against external customer databases using dynamic runtime connections. |
+
+---
+
+## 🏛️ System Architecture
 
 ```mermaid
-graph TD
-    UserQuery([User Question]) --> AmbiguityCheck{Ambiguous Question?}
-    AmbiguityCheck -- Yes --> Clarify[Return Clarification & Suggestion Chips]
-    Clarify --> UI[Frontend Dashboard]
-    AmbiguityCheck -- No --> Introspect[Dynamic Schema Introspection & System Table Exclusion]
-    Introspect --> Relevance[Schema Relevance Engine & Graph Bridge Discovery]
-    Relevance --> AI[Dialect-Aware AI SQL Generation]
-    UserEdit([Manually Edited SQL]) --> Guard[1. SqlGuardrailService]
-    AI --> Guard
-    Guard -- Validate SELECT/Keywords --> SchemaVal[2. SqlSchemaValidator]
-    SchemaVal -- Validation Failed (1st try) --> RetryCheck{Retry Attempted?}
-    RetryCheck -- No --> RetryPrompt[Controlled SQL Regeneration with Feedback]
-    RetryPrompt --> Guard
-    RetryCheck -- Yes --> BlockSchema[Halt Execution & Report Schema Error]
-    BlockSchema --> UI
-    SchemaVal -- Verify Tables/Columns --> CheckSkip{Is Custom SQL?}
-    CheckSkip -- Yes --> Executor[4. SqlExecutorService]
-    CheckSkip -- No --> SemanticVal[3. SqlSemanticValidator]
-    SemanticVal -- Mismatch / Failed --> Block[Block Execution & Expose Intent Mismatch]
-    SemanticVal -- Intent Matches Query --> Executor
-    Executor -- Execute SELECT --> DB[(MySQL / PostgreSQL / Demo DB)]
-    Executor --> Log[Tenant-Isolated QueryLog Database]
+flowchart TD
+    subgraph Client["Frontend Layer (Next.js 16 + React 19 + Tailwind CSS v4)"]
+        User([User / Analyst / Admin])
+        UI["Interactive Analytics Workspace"]
+        Editor["SQL Editor & Visualizer"]
+        DashboardUI["Multi-Tenant Dashboards"]
+        SemanticUI["Semantic Model & Lineage Explorer"]
+    end
+
+    subgraph API["Backend SaaS Gateway (Laravel 12 API + Sanctum)"]
+        Router["API Routing & Correlation (X-Request-ID)"]
+        RateLimiter["Rate Limiting Profiles (API, Auth, AI, Query)"]
+        AuthMiddleware["Sanctum Auth & Tenant Boundary Enforcement"]
+        RBAC["Three-Tier Role Verification (Admin / Analyst / Viewer)"]
+    end
+
+    subgraph Intelligence["Query Intelligence & Semantic Pipeline"]
+        Ambiguity["1. Question Ambiguity Service"]
+        SchemaIntrospect["2. Dynamic Schema Introspection"]
+        SchemaRelevance["3. Schema Relevance Engine & Graph BFS"]
+        SemanticContext["4. Semantic Context & Prompt Injection"]
+        AI["5. Dialect-Aware LLM Generation (Gemini 3.5-flash)"]
+    end
+
+    subgraph Guardrails["Multi-Tier Verification Gateway"]
+        SQLGuard["6. AST SQL Guardrails (SELECT Only)"]
+        SchemaVal["7. Dialect Schema Validator (MySQL / PostgreSQL)"]
+        RetryStrat["8. Controlled Self-Healing Regeneration (Max 1)"]
+        SemanticVal["9. Business Semantic & Intent Validator"]
+        GrainAnalysis["10. Query Grain & Fan-Out Risk Analyzer"]
+    end
+
+    subgraph Execution["Isolated Execution & Observability"]
+        Executor["11. SqlExecutorService (Read-Only Session)"]
+        CustomerDB[("External Customer Database (MySQL / PostgreSQL)")]
+        AppDB[("SaaS Application Database (Encrypted Credentials & Logs)")]
+        Audit["Structured Telemetry & Audit Logs"]
+    end
+
+    User --> UI
+    UI --> Router
+    DashboardUI --> Router
+    SemanticUI --> Router
+    Router --> RateLimiter --> AuthMiddleware --> RBAC
+
+    RBAC --> Ambiguity
+    Ambiguity -- Unambiguous Question --> SchemaRelevance
+    SchemaIntrospect --> SchemaRelevance
+    SemanticContext --> SchemaRelevance
+    SchemaRelevance --> AI
+
+    AI --> SQLGuard
+    Editor -- Custom SQL --> SQLGuard
+    SQLGuard --> SchemaVal
+
+    SchemaVal -- Schema Error (1st Try) --> RetryStrat
+    RetryStrat --> AI
+    SchemaVal -- Verified --> SemanticVal
+
+    SemanticVal --> GrainAnalysis
+    GrainAnalysis --> Executor
+
+    Executor -- Read-Only Query with Session Timeout --> CustomerDB
+    Executor --> Audit --> AppDB
+    CustomerDB --> Executor
     Executor --> UI
-    Block --> Log
-    Block --> UI
-    UI --> Editor[SqlEditor.tsx]
-    UI --> SchemaExplorer[SchemaExplorer.tsx with Search & Badges]
-    SchemaExplorer --> API_Schema[GET /api/v1/database-connections/{id}/schema]
 ```
 
-### 1. Question Ambiguity Intelligence (`QuestionAmbiguityService`)
-- Detects underspecified, metric-vague, entity-vague, and period-vague questions before consuming LLM tokens.
-- Returns structured HTTP 200 clarification responses with actionable suggestions, prompt clarification questions, and reasons.
-- Frontend renders interactive clarification suggestion chips that users can click to execute immediate clarified inquiries.
+---
 
-### 2. Schema Relevance Engine & Graph Traversal (`SchemaRelevanceService`)
-- **Normalized Schema**: Enriched column types, nullability, PK/FK flags, and explicit relationship maps.
-- **System Table Exclusion**: Filters internal framework tables (`migrations`, `telescope_%`, `pulse_%`, etc.) and system schemas (`pg_catalog`, `information_schema`, etc.).
-- **In-Memory Relational Graph**: Builds an in-memory graph from FK relationships and uses Breadth-First Search (BFS) to identify necessary bridge/junction tables (e.g., connecting `customers` and `products` through `orders` and `order_items`).
-- **Large Schema Protection**: Configurable limits on tables, columns per table, and schema payload bytes (`config/schema.php`).
-- **Fallback Guarantee**: Unmatchable questions gracefully fall back to the full normalized schema, ensuring queries never run against an empty schema context.
+## 🔄 The Layered Execution Pipeline
 
-### 3. SQL Guardrails (`SqlGuardrailService`)
-- **Select-Only Check**: Asserts query starts with `SELECT`.
-- **Semicolon Check**: Blocks multiple statements.
-- **Forbidden Keyword Audit**: Strips string literals and blocks `INSERT`, `UPDATE`, `DELETE`, `DROP`, `ALTER`, `TRUNCATE`, `CREATE`, `GRANT`, `REVOKE`, `INTO`, `LOAD`, `REPLACE`, `SHOW`, `LOCK`.
+Every inquiry flows through an orchestrated pipeline ensuring safety, accuracy, and predictability:
 
-### 4. Dialect-Aware Schema Validation (`SqlSchemaValidator`)
-- Validates referenced tables and columns against active customer schema.
-- Comprehensive dialect-specific function whitelists for MySQL (`DATE_FORMAT`, `DATEDIFF`, `NOW`, etc.) and PostgreSQL (`DATE_TRUNC`, `EXTRACT`, `TO_CHAR`, `AGE`, etc.).
-- Pre-processes and masks SQL `EXTRACT(... FROM ...)` expressions so internal `FROM` keywords do not corrupt table identification.
-
-### 5. Controlled SQL Regeneration Retry Strategy
-- If initial generated SQL fails schema or semantic validation, the system executes **at most 1 controlled correction attempt**.
-- Feeds the exact validation failure reason back to the LLM model to guide self-correction.
-- Safely halts if the retry attempt also fails, preventing infinite loops or hallucination spirals.
-
-### 6. Semantic Validation & Query Interpretation (`SqlSemanticValidator` & `QueryInterpretationService`)
-- **Two-Tier Semantic Evaluation**: Deterministic structural intent check (grouping, aggregations, ordering, joins) and AI-assisted intent verification.
-- **Deep Query Interpretation**:
-  - **Tables Used**: Automatically extracts and maps all referenced tables.
-  - **Joins**: Resolves aliases and outputs explicit join paths (e.g., `orders.id → order_items.order_id`).
-  - **Relational Grain**: Computes hierarchical output grain along 1:N cardinalities (e.g., `Order → Order Item`, `Customer → Order`).
-  - **Filters**: Captures WHERE predicates with resolved table identifiers (e.g., `orders.status = 'completed'`).
-  - **Aggregations**: Extracts target expressions and functions (e.g., `SUM(orders.total_amount)`).
-- **⚠ Potential Multiplication Risk Detection (Fan-Out / Chasm Trap)**:
-  - Automatically identifies when aggregations (`SUM`, `AVG`) operate on parent-table columns across 1:N joined child tables (e.g., `SUM(orders.total)` joined to `order_items`).
-  - Flags prominent warning callout (`order_items contains multiple rows per order.`) with metric inflation details and mitigation recommendations.
-  - Available for both AI-generated queries and custom SQL executions.
-
-### 7. Reusable Business Intelligence & Analytics Workspace (`SavedQueryController`)
-- **Query Persistence**: Verified queries can be saved with custom names, descriptions, target database links, and visualization preferences (`bar`, `line`, `table`).
-- **Zero-Bypass Re-Execution**: Saved queries are treated as reusable business artifacts, **never** as trusted execution bypasses. Re-running a query re-validates tenant authorization, database connection availability, SQL guardrails, and active schema validity (protecting against schema drift).
-- **Deleted Connection Safety**: If a saved query's customer database connection is deleted, execution safely halts with `422: "This saved query's database connection is no longer available."` rather than falling back to demo data.
-- **Audit Source Tracking**: Logs every execution to `query_logs` with `source: 'saved_query'` (distinguishing from `natural_language` and `custom_sql`).
-- **Interactive UI**: Workspace provides instant tab navigation between Workspace and the Saved Query Library with multi-field search and connection filtering.
-
-### 8. Dashboards & Multi-Tenant Visual Analytics (`DashboardController`)
-- **Zero-Bypass Shared Pipeline**: Dashboards reference `SavedQuery` records rather than duplicating SQL. All widgets execute through `SavedQueryExecutionService` enforcing full guardrails, dynamic schema validation, and read-only executor defense-in-depth.
-- **Strict Tenant Isolation**: Companies can only view, update, delete, and execute their own dashboards and widgets. Cross-tenant widget creation is rejected server-side.
-- **Partial Failure Resilience**: Dashboards with multiple widgets handle failures independently. If one widget encounters a deleted connection or schema drift, it safely reports an isolated error state while remaining widgets render healthy data.
-- **Dynamic Visualizations**: Widgets support live KPI/Metric displays for single numeric values, interactive SVG Bar Charts, SVG Line Charts, and scrollable Data Tables.
-- **Execution Flow**:
 ```
-User
+User Question
   ↓
-Dashboard
+1. Business Semantic Context (Injects company-defined canonical metrics, rules & synonyms)
   ↓
-Dashboard Widget
+2. Dynamic Schema Relevance (Selects relevant tables via BFS graph traversal over foreign keys)
   ↓
-Saved Query
+3. AI SQL Generation (Synthesizes dialect-specific SQL using structured LLM schemas)
   ↓
-Database Connection
+4. SQL Guardrails (Enforces SELECT-only statements; strips literals; blocks non-SELECT keywords)
   ↓
-Security Pipeline (Guardrails → Live Schema Validation → Read-Only Execution)
+5. Schema Validation (Validates all tables, columns, and dialect functions against introspected schema)
   ↓
-Customer Database
+6. Controlled Self-Healing (Feeds exact validation error back to AI for 1 controlled correction)
   ↓
-Results
+7. Semantic Intent Verification (Verifies SQL semantics match user question intent)
   ↓
-Visualization (Metric / Bar / Line / Table)
+8. Business Metric Validation (Asserts required filters like status = 'completed' are applied)
+  ↓
+9. Relational Grain & Fan-Out Analysis (Detects 1:N multiplication risks across parent aggregations)
+  ↓
+10. Read-Only Isolated Execution (Sets session timeouts and executes with row-truncation caps)
+  ↓
+Results, Visualizations & Correlated Telemetry
 ```
 
-### 9. Dashboard Filters, Exports & Performance Optimization (`DashboardFilterService` & `DashboardCacheService`)
-- **Global Date Filter Engine**:
-  - Automatically resolves preset date bounds: `Today`, `Yesterday`, `Last 7 Days`, `Last 30 Days`, `This Month`, `Last Month`, `This Quarter`, and `Custom Range`.
-  - Non-destructive query compatibility analysis checks source tables for date/timestamp columns (`order_date`, `created_at`, `transaction_date`, etc.).
-  - Unsupported queries (e.g. compound `UNION` statements or queries without date columns) cleanly report `Date filter unavailable for this widget` and execute unmodified without failing the dashboard.
-- **Safe Prepared Parameterization**:
-  - Strictly avoids raw string replacement or string concatenation.
-  - Wraps existing WHERE predicates: `WHERE (<existing>) AND (<predicate>)` and binds date values via PDO prepared statement placeholders (`?`).
-- **Short-Lived Caching & Dual Refresh**:
-  - 5-minute memory cache (TTL = 300s) with strict tenant isolation (`tts_dash:c_{company_id}:db_{conn}:sq_{id}:v_{version}:f_{filter_hash}`).
-  - Fail-safe architecture: cache driver issues fail open to live execution without breaking the user experience.
-  - Dual refresh controls: `Refresh` (cached) and `Force Fresh Data` (`bypass_cache: true`) for live database re-execution.
-- **RFC 4180 CSV & Executive Summary Export**:
-  - Streaming CSV export (`GET /api/v1/dashboards/{id}/export/csv`) respecting active filters and including Microsoft Excel UTF-8 BOM.
-  - Automated spreadsheet formula injection defense: sanitizes cells starting with `=`, `+`, `-`, `@`, `\t`, `\r` by prefixing with `'`.
-  - Executive summary JSON endpoint (`GET /api/v1/dashboards/{id}/export/summary`) and browser `Print / PDF` printable view.
-- **Calculation Risk Warning Modal**:
-  - Detects potential fan-out multiplication risks in widgets and provides on-click modal inspection with grain analysis, JOIN paths, and mitigation recommendations.
+---
+
+## ⚡ Feature Summary
+
+### 🤖 AI & Correctness
+- **Dialect-Aware Generation**: Generates native MySQL and PostgreSQL syntax, leveraging dialect-specific date functions (`DATE_FORMAT`, `DATE_TRUNC`, `EXTRACT`).
+- **Controlled Self-Healing Regeneration**: If generated SQL fails schema or semantic validation, the system executes **at most 1 controlled correction attempt** feeding the exact error back to the LLM.
+- **Ambiguity Detection**: Detects metric-vague, period-vague, or entity-vague questions before consuming LLM tokens, returning structured clarification options and suggestion chips.
+- **Query Complexity Detection**: Analyzes AST structures for unbounded `SELECT *`, Cartesian products (`CROSS JOIN`), and excessive multi-table joins.
+
+### 🛡️ Security & Guardrails
+- **AST SQL Guardrails**: Strictly enforces `SELECT`-only execution. Pre-processes strings to eliminate false positives while blocking dangerous keywords (`INSERT`, `UPDATE`, `DELETE`, `DROP`, `ALTER`, `TRUNCATE`, `GRANT`, `REVOKE`, etc.).
+- **Read-Only Session Timeouts**: Sets driver-level session timeouts (`SET SESSION max_execution_time` for MySQL; `SET statement_timeout` for PostgreSQL) preventing unkillable query locks.
+- **Encrypted Credentials**: External database passwords are encrypted at rest using AES-256. Passwords are never returned in JSON payloads, logs, or LLM prompts.
+- **Formula Injection Defense**: Spreadsheet export sanitizes CSV output cells starting with `=`, `+`, `-`, `@`, `\t`, `\r` by prefixing with `'`.
+
+### 🏢 Multi-Tenancy & RBAC
+- **Strict Tenant Boundaries**: Global Eloquent scopes (`CompanyScope`) isolate all resources (saved queries, dashboards, database connections, semantic metrics).
+- **Three-Tier Role Hierarchy**:
+  - **Admin**: Full administrative privileges over team members, customer database connections, semantic metrics, table classifications, and queries.
+  - **Analyst**: Access to query workspace, saved queries, dashboards, and schema explorers; read-only access to team and semantic definitions.
+  - **Viewer**: Read-only access restricted to company-shared saved queries and dashboards; arbitrary query execution is blocked.
+- **Anti-Lockout & Asset Preservation**: Admins cannot demote themselves; the last company admin cannot be removed; member removal preserves shared company assets via `ON DELETE SET NULL`.
+
+### 📊 Business Semantics (Phase 9)
+- **Canonical Metrics**: Company-defined single sources of truth with explicit source tables, columns, aggregations, and mandatory filter conditions.
+- **Business Terminology Mapping**: Maps company jargon, abbreviations, and ambiguous business concepts to canonical entities.
+- **Table Governance & Classifications**: Categorizes tables into `business`, `staging`, `archive`, `test`, and `internal`.
+- **Data Lineage Visualizer**: Directed node-edge graph tracing multi-tier relationships: `Canonical Metric → Source Column / Filter → Source Table → Foreign Key Joins`.
+- **Semantic Drift Detection**: Saved queries store an immutable semantic snapshot; if corporate definitions evolve, visual diff banners highlight formula discrepancies.
+
+### 📈 Dashboards & Visual Analytics
+- **Zero-Bypass Architecture**: Dashboards execute saved queries through the full security and validation pipeline.
+- **Partial Failure Resilience**: Broken widgets (e.g. dropped customer tables) fail gracefully in isolation without breaking the rest of the dashboard.
+- **Global Date Range Engine**: Injects parameterized date filters into supported widget queries using PDO placeholders without raw string concatenation.
+- **Interactive SVG Visualizations**: Responsive, zero-dependency SVG distribution bars, chronological trend lines with tooltips, and KPI metric counters.
+- **RFC 4180 CSV & Executive Summary**: Export filtered dashboard data as RFC 4180 streaming CSV with Excel UTF-8 BOM or download structured executive summaries.
+
+### 🔍 Reliability & Observability (Phase 10)
+- **Multi-Profile Rate Limiting**: Dedicated rate limits for general API (`120/min`), AI generation (`20/min`), query execution (`30/min`), and authentication (`10/min`).
+- **End-to-End Request Correlation (`X-Request-ID`)**: Correlates every HTTP transaction through API middleware, structured logs (`Log::withContext`), and frontend copyable badges.
+- **Operational Health & Readiness Probes**: Separate HTTP liveness (`/api/health`) and readiness (`/api/ready`) probes. Customer database downtime is isolated from SaaS readiness.
+- **Customer DB Latency Probing**: Active health check endpoint (`/api/v1/database-connections/{id}/health`) measuring connection latency in milliseconds.
 
 ---
 
 ## 🛠️ Technology Stack
-- **Backend**: Laravel 12, Eloquent ORM, PHPUnit.
-- **Frontend**: Next.js 16 (App Router, Turbopack), TypeScript, Tailwind CSS v4.
-- **Database**: MySQL 8.0.
-- **AI Integrations**: Gemini 3.5-flash API via Server-Side HTTP Client.
+
+### Frontend
+- **Framework**: [Next.js 16.3](https://nextjs.org/) (App Router, React 19 Server/Client Components, Turbopack)
+- **Language**: [TypeScript 5](https://www.typescriptlang.org/)
+- **Styling**: [Tailwind CSS v4](https://tailwindcss.com/)
+- **Typography**: Outfit & Inter (Google Fonts via `next/font`)
+- **Charts**: Zero-dependency, lightweight, responsive SVG visualizers
+
+### Backend
+- **Framework**: [Laravel 12](https://laravel.com/)
+- **Language**: [PHP 8.2+](https://www.php.net/)
+- **Authentication**: [Laravel Sanctum](https://laravel.com/docs/sanctum) (Bearer Token SPA Authentication)
+- **Testing**: [PHPUnit 11](https://phpunit.de/)
+
+### Databases
+- **Application Database**: MySQL 8.0 (internal tenant, user, query, and dashboard metadata)
+- **Customer Databases Supported**: MySQL 8.0 & PostgreSQL 14+ (external runtime connections)
+
+### AI Integration
+- **Engine**: [Google Gemini 3.5-flash](https://ai.google.dev/) via structured JSON schema completions
 
 ---
 
-## 📁 API Endpoints
+## 🎯 Realistic Demo Scenario: Valid SQL vs. Business Truth
 
-### 1. Execute SQL / Question
-- **Endpoint**: `POST /api/v1/query`
-- **Body**:
-  ```json
-  {
-    "question": "Show total sales by month.",
-    "sql": "SELECT DATE_FORMAT(order_date, '%Y-%m') AS month, SUM(total_amount) AS revenue FROM orders GROUP BY month"
-  }
-  ```
-- **Response**:
-  ```json
-  {
-    "question": "Show total sales by month.",
-    "sql": "SELECT DATE_FORMAT(order_date, '%Y-%m') AS month, SUM(total_amount) AS revenue FROM orders GROUP BY month",
-    "guardrails": { "allowed": true, "reason": null },
-    "schema_validation": { "valid": true, "reason": null },
-    "semantic_validation": {
-      "valid": true,
-      "score": 0.98,
-      "reason": null,
-      "interpretation": "Extracts year and month from orders, sums revenue, and groups chronologically by month.",
-      "tables": ["orders"],
-      "operations": ["SUM", "DATE_FORMAT", "GROUP BY"],
-      "filters": [],
-      "grouping": ["month"],
-      "ordering": []
-    },
-    "execution": {
-      "success": true,
-      "error": null,
-      "time_ms": 14.5,
-      "results": [ { "month": "2026-08", "revenue": 1420.50 } ]
-    },
-    "confidence": 0.98,
-    "explanation": "Extracts the year and month from order_date, sums the order amounts, and groups chronologically."
-  }
-  ```
+To understand why this platform exists, consider the following real-world scenario:
 
-### 2. Schema Explorer
-- **Endpoint**: `GET /api/v1/schema`
-- **Response**:
-  ```json
-  {
-    "success": true,
-    "data": {
-      "tables": [
-        {
-          "name": "customers",
-          "columns": [ { "name": "id", "type": "bigint (PK)" } ]
-        }
-      ],
-      "relationships": [
-        { "from": "orders.customer_id", "to": "customers.id", "label": "belongs to customer" }
-      ]
-    }
-  }
-  ```
+### The Business Question
+> *"What was our total revenue last month?"*
 
-### 3. Query History Logs
-- **Endpoint**: `GET /api/v1/history`
+### ❌ What Vanilla AI Generates
+```sql
+SELECT SUM(total_amount) AS revenue 
+FROM orders 
+WHERE order_date >= '2026-08-01' AND order_date <= '2026-08-31';
+```
+- **The Problem**: This query executes cleanly and returns a number. However, it includes **cancelled, refunded, and fraudulent orders**. In an enterprise context, this answer is **factually wrong** and misleads leadership.
 
-### 4. Authentication (Sanctum)
-- `POST /api/v1/auth/register` — Register tenant company & user
-- `POST /api/v1/auth/login` — Sign in and obtain Sanctum bearer token
-- `POST /api/v1/auth/logout` — Revoke token and clear session (authenticated)
-- `GET  /api/v1/auth/me` — Get current user & company profile (authenticated)
-
-### 5. Multi-Tenant Database Connections
-- `POST /api/v1/database-connections/test` — Probe customer connection without persisting
-- `GET  /api/v1/database-connections` — List all connections for authenticated tenant
-- `POST /api/v1/database-connections` — Validate and store encrypted connection
-- `GET  /api/v1/database-connections/{id}` — Get connection metadata (password hidden)
-- `DELETE /api/v1/database-connections/{id}` — Purge and delete tenant connection
-- `GET  /api/v1/database-connections/{id}/schema` — Dynamic schema introspection (MySQL & PostgreSQL)
-
-### 6. Saved Queries & Analytics Workspace
-- `GET    /api/v1/saved-queries` — List saved queries for tenant (supports `?search=` and `?database_connection_id=`)
-- `POST   /api/v1/saved-queries` — Save verified query (with guardrail validation and database association)
-- `GET    /api/v1/saved-queries/{id}` — Get single saved query details
-- `PUT    /api/v1/saved-queries/{id}` — Update query metadata, visualization type, or SQL
-- `DELETE /api/v1/saved-queries/{id}` — Delete saved query
-- `POST   /api/v1/saved-queries/{id}/execute` — Re-execute saved query through full guardrails, schema validation, and customer DB execution
-
-### 7. Dashboards & Analytics Widgets
-- `GET    /api/v1/dashboards` — List company dashboards with widget counts (supports `?search=`)
-- `POST   /api/v1/dashboards` — Create new dashboard for authenticated tenant
-- `GET    /api/v1/dashboards/{id}` — Retrieve dashboard with eager-loaded widgets and saved queries
-- `PUT    /api/v1/dashboards/{id}` — Update dashboard name/description
-- `DELETE /api/v1/dashboards/{id}` — Delete dashboard and cascade-delete its widgets
-- `POST   /api/v1/dashboards/{id}/widgets` — Add saved query as a widget (enforces tenant ownership)
-- `PATCH  /api/v1/dashboards/{id}/widgets/{widgetId}` — Update widget title, visualization type, width, or position
-- `DELETE /api/v1/dashboards/{id}/widgets/{widgetId}` — Remove widget from dashboard
-- `POST   /api/v1/dashboards/{id}/execute` — Re-execute all dashboard widgets through zero-bypass security pipeline with partial failure resilience
+### ✅ What This Platform Enforces
+1. **Semantic Metric Injection**: The platform's `SemanticContextService` retrieves the company's canonical metric definition:
+   - **Metric**: `Revenue`
+   - **Source Table**: `orders` (Classified as `business` source of truth)
+   - **Source Column**: `total_amount`
+   - **Aggregation**: `SUM`
+   - **Mandatory Filter**: `status = 'completed'`
+2. **Dialect-Aware Generation**: Gemini synthesizes the query constrained by the injected business rules:
+   ```sql
+   SELECT SUM(orders.total_amount) AS total_revenue
+   FROM orders
+   WHERE orders.status = 'completed'
+     AND orders.order_date >= '2026-08-01'
+     AND orders.order_date <= '2026-08-31';
+   ```
+3. **AST Semantic Validation**: `SqlSemanticValidator` parses the AST and verifies:
+   - Target table is a `business` table (not `staging_orders` or `archive_orders`).
+   - The required predicate `status = 'completed'` is present in the `WHERE` clause.
+4. **Relational Grain & Fan-Out Analysis**: Asserts that no 1:N join with `order_items` exists that would multiply order amounts.
+5. **Read-Only Session Execution**: Executes with driver session timeout and caps result at 1,000 rows.
+6. **Result**: A verified, audit-logged business answer you can trust.
 
 ---
 
-## 🏢 Multi-Tenant SaaS & Security Architecture
+## 👥 Role-Based Access Control (RBAC)
 
-### Clear Separation of Concerns:
-- **Application Database (Internal)**:
-  - Houses platform tables: `users`, `companies`, `database_connections`, `query_logs`.
-  - Customer queries NEVER run against the application database.
-- **Customer Database (External)**:
-  - Isolated business data owned by the customer (MySQL or PostgreSQL).
-  - Dynamically connected at runtime using tenant-scoped identifiers (`tenant_c{company_id}_db{connection_id}`).
-  - Dynamic schema introspection queries `information_schema` to extract tables, columns, primary keys, and relationships into a normalized model.
+The platform enforces a three-tier permission model across company boundaries:
 
-### 🛡️ Concrete Security Protections:
-1. **Tenant Isolation**: All database connection CRUD and introspection operations enforce company-level ownership checks server-side.
-2. **Credential Encryption at Rest**: Passwords stored using AES-256 (`encrypted` cast). Passwords are never returned in JSON, never displayed in the frontend, never logged, and never included in Gemini prompts.
-3. **Dedicated READ-ONLY User Recommendation**:
-   > [!IMPORTANT]
-   > For production deployments, customers should ALWAYS configure a dedicated database user with `SELECT` privileges only.
-   > ```sql
-   > CREATE USER 'tts_readonly'@'%' IDENTIFIED BY 'secure_password';
-   > GRANT SELECT ON customer_db.* TO 'tts_readonly'@'%';
-   > FLUSH PRIVILEGES;
-   > ```
-4. **Defense-in-Depth Guardrails**: Even if a customer mistakenly provides a write user, our `SqlGuardrailService` blocks all `INSERT`, `UPDATE`, `DELETE`, `DROP`, `ALTER`, `TRUNCATE`, and administrative statements before execution.
-5. **Safe Error Sanitization**: Connection probes and executor exceptions are sanitized to avoid exposing raw PDO exceptions, network topology, or credentials.
-
----
-
-## 👥 Team Collaboration, Roles & Resource Permissions (Phase 8)
-
-The platform provides a comprehensive multi-tenant role-based access control (RBAC) and resource-sharing model that empowers organizations to collaborate securely.
-
-### Role Permissions Matrix
-
-| Capability | Admin | Analyst | Viewer |
+| Permission / Action | Admin | Analyst | Viewer |
 | :--- | :---: | :---: | :---: |
-| **Manage Team Members** (Invite, update roles, remove) | ✅ Full | ❌ View Directory | ❌ View Directory |
-| **Manage Database Connections** (Add, edit, test, delete) | ✅ Full | ❌ None | ❌ None |
-| **Use Connections for Querying** | ✅ Yes | ✅ Yes (credential-free) | ❌ Restricted |
-| **Interactive Query Workspace** (Natural language & SQL) | ✅ Yes | ✅ Full (with guardrails) | ❌ Blocked |
-| **Create Saved Queries & Dashboards** | ✅ Yes | ✅ Yes | ❌ View-only |
-| **Set Resource Visibility** (`private` ↔ `company`) | ✅ Yes (owned assets) | ✅ Yes (owned assets) | ❌ None |
-| **Edit/Delete Owned Assets** | ✅ Yes | ✅ Yes | ❌ None |
-| **Edit/Delete Other Members' Assets** | ✅ Yes (Admin override) | ❌ Forbidden | ❌ Forbidden |
-| **View & Execute Company-Shared Saved Queries** | ✅ Yes | ✅ Yes | ✅ Yes |
-| **View & Execute Company-Shared Dashboards** | ✅ Yes | ✅ Yes | ✅ Yes |
-| **Audit Log Tracking** | ✅ Logged | ✅ Logged | ✅ Logged |
-
-### 🔒 Core Safety & Security Invariants
-
-1. **Anti-Lockout Protection**: Admins cannot modify or demote their own role.
-2. **Last Admin Preservation**: Companies must always maintain at least one active Admin; the last admin cannot be demoted or deleted.
-3. **Asset Preservation on Member Removal**: When a team member leaves or is removed, their company-shared queries and dashboards are **preserved** (the foreign key `user_id` is set to `NULL` via `ON DELETE SET NULL`), preventing team-wide data loss.
-4. **Tenant & Visibility Isolation**: Cross-company member manipulation is rejected with HTTP 404/403. Private assets belonging to other users are completely excluded from API listings (`SavedQuery::visibleTo`, `Dashboard::visibleTo`).
-5. **Widget Injection Defense**: Dashboards cannot embed private queries authored by other users, maintaining privacy across individual analysts.
-6. **Comprehensive Audit Trails**: Membership changes (`member_created`, `member_role_updated`, `member_removed`) and resource sharing actions (`saved_query_shared`, `dashboard_shared`) are persistently recorded in `audit_logs`.
+| **Manage Team** (Invite, change roles, remove) | ✅ Full | ❌ Forbidden | ❌ Forbidden |
+| **Manage Database Connections** (Add, test, delete) | ✅ Full | ❌ Forbidden | ❌ Forbidden |
+| **Manage Semantic Model** (Metrics, terms, classifications) | ✅ Full | ❌ Read-only | ❌ Read-only |
+| **Interactive Query Workspace** (Natural language & SQL) | ✅ Full | ✅ Full (with guardrails) | ❌ Restricted |
+| **Execute Customer Database Queries** | ✅ Yes | ✅ Yes (credential-free) | ❌ Pre-approved only |
+| **Create & Edit Saved Queries** | ✅ Yes | ✅ Yes (owned assets) | ❌ View-only |
+| **Create & Edit Dashboards** | ✅ Yes | ✅ Yes (owned assets) | ❌ View-only |
+| **Change Asset Visibility** (`private` ↔ `company`) | ✅ Yes | ✅ Yes (owned assets) | ❌ Forbidden |
+| **Execute Shared Dashboards & Saved Queries** | ✅ Yes | ✅ Yes | ✅ Yes |
+| **Export Data** (RFC 4180 CSV / Summary) | ✅ Yes | ✅ Yes | ✅ Yes |
+| **Inspect Data Lineage & Semantic Drift** | ✅ Yes | ✅ Yes | ✅ Yes |
 
 ---
 
-## 🚀 Setup Instructions
+## 📁 REST API Documentation
 
-### Backend (Laravel)
-1. Navigate to `/backend`.
-2. Install dependencies:
+All multi-tenant endpoints require a Sanctum Bearer token (`Authorization: Bearer <token>`) and enforce tenant data isolation.
+
+### 1. Operational Health & Probes
+- `GET /api/health` — Lightweight HTTP liveness probe (Public)
+- `GET /api/ready` — Readiness probe verifying application database and cache (Public)
+
+### 2. Authentication
+- `POST /api/v1/auth/register` — Register tenant company and initial Admin user (Rate-limited: 10/min)
+- `POST /api/v1/auth/login` — Sign in and receive Sanctum bearer token (Rate-limited: 10/min)
+- `POST /api/v1/auth/logout` — Revoke active token (Authenticated)
+- `GET  /api/v1/auth/me` — Retrieve current user profile, role, and company metadata (Authenticated)
+
+### 3. Team Management
+- `GET    /api/v1/company/members` — List company team members (Directory access for all; Admin can manage)
+- `POST   /api/v1/company/members` — Invite new team member with role (Admin only)
+- `PUT    /api/v1/company/members/{id}` — Update team member role (Admin only; anti-lockout protected)
+- `DELETE /api/v1/company/members/{id}` — Remove member (Admin only; preserves shared assets via `ON DELETE SET NULL`)
+
+### 4. Database Connections
+- `POST   /api/v1/database-connections/test` — Test connection parameters without storing (Admin only)
+- `GET    /api/v1/database-connections` — List customer connections for active company
+- `POST   /api/v1/database-connections` — Store new encrypted connection (Admin only)
+- `GET    /api/v1/database-connections/{id}` — Retrieve connection metadata (passwords masked)
+- `GET    /api/v1/database-connections/{id}/health` — Probe live connection health and latency in ms (Admin & Analyst)
+- `DELETE /api/v1/database-connections/{id}` — Remove customer database connection (Admin only)
+- `GET    /api/v1/database-connections/{id}/schema` — Introspect dynamic database schema (MySQL / PostgreSQL)
+
+### 5. Query Workspace & History
+- `POST /api/v1/query` — Execute natural language or SQL query through full validation pipeline (Rate-limited: 30/min)
+- `GET  /api/v1/history` — Retrieve company query execution audit logs
+- `GET  /api/v1/schema` — Retrieve default demo database schema
+
+### 6. Reusable Saved Queries
+- `GET    /api/v1/saved-queries` — List accessible saved queries (supports `?search=`, `?database_connection_id=`)
+- `POST   /api/v1/saved-queries` — Save verified query with visualization preferences and visibility
+- `GET    /api/v1/saved-queries/{id}` — Retrieve saved query details
+- `PUT    /api/v1/saved-queries/{id}` — Update saved query SQL or metadata
+- `DELETE /api/v1/saved-queries/{id}` — Delete saved query
+- `POST   /api/v1/saved-queries/{id}/execute` — Re-execute saved query through zero-bypass security pipeline
+
+### 7. Multi-Tenant Dashboards
+- `GET    /api/v1/dashboards` — List accessible company dashboards
+- `POST   /api/v1/dashboards` — Create new dashboard
+- `GET    /api/v1/dashboards/{id}` — Retrieve dashboard with widgets and saved query relationships
+- `PUT    /api/v1/dashboards/{id}` — Update dashboard metadata
+- `DELETE /api/v1/dashboards/{id}` — Delete dashboard (cascades widgets)
+- `POST   /api/v1/dashboards/{id}/widgets` — Add saved query widget to dashboard
+- `PATCH  /api/v1/dashboards/{id}/widgets/{widgetId}` — Reorder or resize widget layout
+- `DELETE /api/v1/dashboards/{id}/widgets/{widgetId}` — Remove widget from dashboard
+- `POST   /api/v1/dashboards/{id}/execute` — Execute all dashboard widgets with partial-failure isolation
+- `GET    /api/v1/dashboards/{id}/export/csv` — Stream RFC 4180 CSV export with formula injection defense
+- `GET    /api/v1/dashboards/{id}/export/summary` — Download structured executive JSON summary
+
+### 8. Business Semantic Layer (Phase 9)
+- `GET    /api/v1/semantic/metrics` — List company canonical metrics
+- `POST   /api/v1/semantic/metrics` — Create canonical metric with mandatory filters and aggregations (Admin only)
+- `PUT    /api/v1/semantic/metrics/{id}` — Update canonical metric (Admin only)
+- `DELETE /api/v1/semantic/metrics/{id}` — Delete canonical metric (Admin only)
+- `GET    /api/v1/semantic/terms` — List terminology and ambiguity mappings
+- `POST   /api/v1/semantic/terms` — Create terminology mapping (Admin only)
+- `PUT    /api/v1/semantic/terms/{id}` — Update terminology mapping (Admin only)
+- `DELETE /api/v1/semantic/terms/{id}` — Delete terminology mapping (Admin only)
+- `GET    /api/v1/semantic/table-classifications` — List table governance classifications
+- `POST   /api/v1/semantic/table-classifications` — Classify table as `business`, `staging`, `archive`, `test`, `internal` (Admin only)
+- `DELETE /api/v1/semantic/table-classifications/{id}` — Delete table classification (Admin only)
+- `GET    /api/v1/semantic/lineage` — Fetch directed node-edge lineage graph (`?metric_id={id}`)
+- `GET    /api/v1/semantic/drift/{savedQueryId}` — Inspect saved query for semantic formula drift
+
+---
+
+## 📸 Key Application Screens (Demo Showcase)
+
+The following 6 screens illustrate the end-to-end user experience and architectural depth of the platform:
+
+1. **Natural Language Query Workspace**: Main interface with conversational inquiry box, Quick Start prompt suggestions, active target database selector, and interactive schema explorer sidebar.
+2. **Query Intent, Semantic Warnings & Complexity Card**: Deep query interpretation displaying detected tables, operations, join paths, output grain, `LOW / MEDIUM / HIGH` complexity risk meters, and `X-Request-ID` copyable correlation badges.
+3. **Dynamic Schema Explorer**: Introspected database tree with column data types, primary/foreign keys, and governance classification tags (`business`, `staging`, `archive`, `⭐ Source of Truth`).
+4. **Business Semantic Management**: Administrative console for managing canonical metric formulas, mandatory filter clauses, business terminology synonyms, and table governance classifications.
+5. **Interactive Data Lineage Visualizer**: Directed SVG node-link graph mapping relationships across metrics, mandatory filters, target tables, and relational foreign keys.
+6. **Multi-Tenant Analytics Dashboard**: Visual analytics layout featuring KPI metric cards, responsive SVG bar and trend charts, global date range presets, RFC 4180 CSV export, and partial-failure isolation.
+
+---
+
+## 🚀 Getting Started Locally
+
+### Prerequisites
+- **PHP**: 8.2 or higher with PDO, OpenSSL, and cURL extensions
+- **Composer**: 2.x
+- **Node.js**: 20.x or higher
+- **MySQL**: 8.0+
+
+---
+
+### Backend Setup (Laravel)
+
+1. Navigate to the backend directory:
+   ```bash
+   cd backend
+   ```
+2. Install PHP dependencies:
    ```bash
    composer install
    ```
-3. Copy `.env.example` to `.env` and set up database/CORS details:
+3. Initialize the environment configuration:
+   ```bash
+   cp .env.example .env
+   php artisan key:generate
+   ```
+4. Configure your MySQL connection and Gemini API key in `backend/.env`:
    ```env
    DB_CONNECTION=mysql
    DB_HOST=127.0.0.1
    DB_PORT=3306
    DB_DATABASE=text_to_sql
    DB_USERNAME=root
-   DB_PASSWORD=
-   
+   DB_PASSWORD=your_password
+
    AI_PROVIDER=gemini
    GEMINI_API_KEY=your_gemini_api_key
    ALLOWED_CORS_ORIGINS=http://localhost:3000
    ```
-4. Run migrations and seed data:
+5. Run migrations and seed default demo data:
    ```bash
    php artisan migrate --seed
    ```
-5. Run server:
+6. Start the backend API server:
    ```bash
-   php artisan serve --port=8001
+   php artisan serve --port=8000
    ```
+   *The API is now running at `http://localhost:8000/api/v1`.*
 
-### Frontend (Next.js)
-1. Navigate to `/frontend`.
+---
+
+### Frontend Setup (Next.js)
+
+1. Open a second terminal and navigate to the frontend directory:
+   ```bash
+   cd frontend
+   ```
 2. Install dependencies:
    ```bash
    npm install
    ```
-3. Create `.env.local` pointing to backend port 8001:
-   ```env
-   NEXT_PUBLIC_API_URL=http://localhost:8001/api/v1
+3. Configure the frontend environment:
+   ```bash
+   cp .env.example .env.local
    ```
-4. Start dev server:
+   *Verify `NEXT_PUBLIC_API_URL=http://localhost:8000/api/v1` in `frontend/.env.local`.*
+4. Start the Next.js development server:
    ```bash
    npm run dev
+   ```
+5. Open your browser and navigate to:
+   ```
+   http://localhost:3000
    ```
 
 ---
 
-## 🧪 Testing Verification
+## 🧪 Testing & Verification Baseline
 
-Run the comprehensive 122-point feature and unit test suite covering authentication, tenant isolation, roles & permissions, team collaboration, encrypted connections, dynamic schema introspection, SQL guardrails, schema validation, semantic validation, saved queries, dashboards, date filters, and partial failure handling:
+The platform maintains an automated test suite verifying all 10 architectural phases.
+
+### Backend Test Suite
+Run the 152-point test suite covering authentication, tenant isolation, RBAC, encrypted connections, dynamic introspection, AST guardrails, schema validation, semantic validation, saved queries, dashboards, date filters, and observability:
 ```bash
+cd backend
 php artisan test
 ```
+**Current Verified Baseline**:
+- **152 tests passed**
+- **1,550 assertions**
+- **0 failures** (Duration: ~22s)
 
-To lint and compile the frontend:
+### Frontend Verification
+Run linting, static type checking, and production compilation:
 ```bash
+cd frontend
 npm run lint
 npx tsc --noEmit
 npm run build
 ```
+**Current Verified Baseline**:
+- **ESLint**: 0 errors, 0 warnings
+- **TypeScript**: 0 errors
+- **Production Build**: Next.js 16 (Turbopack) successfully compiled and optimized
+
+---
+
+## 🔍 Honest Limitations & Scope Boundaries
+
+In the spirit of transparent engineering, the following limitations reflect deliberate architectural boundaries in the current release:
+
+1. **Semantic Definitions Depend on Administrator Configuration**: The platform cannot magically divine custom corporate rules (e.g. what constitutes "active churn") without an administrator configuring canonical metrics and terms.
+2. **Semantic Validation Cannot Mathematically Prove Correctness**: While the AST and AI intent validator detect missing filters, staging tables, and fan-out risks, high-level business questions can have multiple subjective interpretations.
+3. **Complex Nested SQL AST Bounds**: Extremely complex SQL involving 5+ levels of subqueries or non-standard stored procedures may exceed the deterministic AST interpreter's structural analysis capabilities.
+4. **Customer Database Network Latency**: Because queries execute against remote customer databases, execution times are influenced by the customer's external database indexing, server load, and network latency.
+5. **No Billing or Subscription Module in Current Scope**: In accordance with project milestones, Stripe, subscription tiers, and automated billing are intentionally excluded from this release.
+
+---
+
+## 📄 License
+
+This project is licensed under the [MIT License](LICENSE).

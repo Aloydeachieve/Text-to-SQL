@@ -13,6 +13,7 @@ class DashboardWidget extends Model
     protected $fillable = [
         'dashboard_id',
         'saved_query_id',
+        'metric_id',
         'title',
         'visualization_type',
         'position',
@@ -45,5 +46,13 @@ class DashboardWidget extends Model
     public function savedQuery(): BelongsTo
     {
         return $this->belongsTo(SavedQuery::class);
+    }
+
+    /**
+     * Semantic metric associated with this widget (if any).
+     */
+    public function metric(): BelongsTo
+    {
+        return $this->belongsTo(SemanticMetric::class, 'metric_id');
     }
 }

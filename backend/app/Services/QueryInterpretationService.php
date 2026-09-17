@@ -42,6 +42,7 @@ class QueryInterpretationService
 
         $grain = $this->determineGrain($tables, $joins, $grouping, $aggregations, $relationships);
         $multiplicationRisk = $this->detectMultiplicationRisk($tables, $joins, $aggregations, $grouping, $relationships);
+        $complexity = $this->detectComplexityRisk($sqlWithoutStrings, $tables, $joins, $filters);
 
         return [
             'tables' => $tables,
@@ -50,6 +51,8 @@ class QueryInterpretationService
             'filters' => $filters,
             'aggregations' => $aggregations,
             'multiplication_risk' => $multiplicationRisk,
+            'risk_level' => $complexity['risk_level'],
+            'risk_reasons' => $complexity['risk_reasons'],
         ];
     }
 
@@ -440,6 +443,59 @@ class QueryInterpretationService
         }
 
         return null;
+    }
+
+    /**
+     * Identify potential complexity risks (e.g. unbounded SELECT *, excessive joins, Cartesian products).
+     *
+     * @param string $sql
+     * @param list<string> $tables
+     * @param list<string> $joins
+     * @param list<string> $filters
+     * @return array{risk_level: 'low'|'medium'|'high', risk_reasons: list<string>}
+     */
+    public function detectComplexityRisk(string $sql, array $tables, array $joins, array $filters): array
+    {
+        $reasons = [];
+
+        $hasSelectAll = (bool) preg_match('/\bSELECT\s+(?:DISTINCT\s+)?(?:\*|[a-zA-Z0-9_]+\.\*)/i', $sql);
+        $hasLimit = (bool) preg_match('/\bLIMIT\s+\d+/i', $sql);
+        $hasCrossJoin = (bool) preg_match('/\bCROSS\s+JOIN\b/i', $sql);
+        $hasCommaJoin = (bool) preg_match('/\bFROM\s+[`"]?[a-zA-Z0-9_]+[`"]?\s*,\s*[`"]?[a-zA-Z0-9_]+[`"]?/i', $sql);
+
+        // 1. Unbounded SELECT *
+        if ($hasSelectAll && !$hasLimit) {
+            $reasons[] = 'Unbounded SELECT * without a LIMIT clause may retrieve thousands of columns and rows, impacting browser performance.';
+        }
+
+        // 2. Cartesian product / cross join
+        if ($hasCrossJoin || $hasCommaJoin) {
+            $reasons[] = 'Potential Cartesian product (CROSS JOIN) detected without explicit ON predicates, which can cause combinatorial row multiplication.';
+        }
+
+        // 3. Excessive joins (>4 joins)
+        if (count($joins) > 4) {
+            $joinCount = count($joins);
+            $reasons[] = "Query joins {$joinCount} tables, which may consume significant database memory and execution time.";
+        }
+
+        // 4. Multi-table query with zero filters and no limit
+        if (count($tables) >= 2 && empty($filters) && !$hasLimit) {
+            $reasons[] = 'Multi-table join query contains no WHERE filter constraints or LIMIT clause.';
+        }
+
+        // Compute risk level
+        $riskLevel = 'low';
+        if ($hasCrossJoin || $hasCommaJoin || (count($joins) > 4 && empty($filters))) {
+            $riskLevel = 'high';
+        } elseif ($hasSelectAll && !$hasLimit || count($joins) > 3 || (count($tables) >= 2 && empty($filters))) {
+            $riskLevel = 'medium';
+        }
+
+        return [
+            'risk_level' => $riskLevel,
+            'risk_reasons' => $reasons,
+        ];
     }
 
     /**

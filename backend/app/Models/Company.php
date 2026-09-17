@@ -45,4 +45,28 @@ class Company extends Model
     {
         return $this->hasMany(Dashboard::class);
     }
+
+    /**
+     * Semantic metrics belonging to this company.
+     */
+    public function semanticMetrics(): HasMany
+    {
+        return $this->hasMany(SemanticMetric::class);
+    }
+
+    /**
+     * Semantic terms belonging to this company.
+     */
+    public function semanticTerms(): HasMany
+    {
+        return $this->hasMany(SemanticTerm::class);
+    }
+
+    /**
+     * Table classifications belonging to this company.
+     */
+    public function tableClassifications(): HasMany
+    {
+        return $this->hasMany(SemanticTableClassification::class);
+    }
 }

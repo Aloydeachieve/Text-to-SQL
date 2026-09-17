@@ -8,8 +8,8 @@ const outfit = Outfit({
 });
 
 export const metadata: Metadata = {
-  title: "Text-to-SQL Interface with Guardrails",
-  description: "A portfolio-grade natural language to SQL translation interface featuring strict security guardrails, confidence scores, and instant visual execution audits.",
+  title: "Text-to-SQL Analytics Platform | AI with Guardrails & Semantic Intelligence",
+  description: "Enterprise multi-tenant Text-to-SQL analytics SaaS featuring strict SQL guardrails, business semantic layer, dynamic schema intelligence, and production observability.",
 };
 
 export default function RootLayout({

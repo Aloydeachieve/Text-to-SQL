@@ -194,10 +194,13 @@ class SavedQueryExecutionService
             }
         }
 
+        $requestId = request()->attributes->get('request_id');
+
         // 3. Guardrail check (SELECT-only and forbidden keyword audit)
         $guardrailResult = $this->guardrailService->validate($sql);
         if (!$guardrailResult['allowed']) {
             QueryLog::create([
+                'request_id' => $requestId,
                 'user_id' => $userId,
                 'company_id' => $companyId,
                 'database_connection_id' => $savedQuery->database_connection_id,
@@ -207,6 +210,8 @@ class SavedQueryExecutionService
                 'passed_guardrails' => false,
                 'execution_status' => 'blocked',
                 'error_message' => $guardrailResult['reason'],
+                'error_code' => 'GUARDRAIL_BLOCKED',
+                'risk_level' => 'high',
                 'confidence_score' => 1.0,
             ]);
 
@@ -220,12 +225,14 @@ class SavedQueryExecutionService
                 'execution' => [
                     'success' => false,
                     'error' => 'Blocked by guardrails: ' . $guardrailResult['reason'],
+                    'error_code' => 'GUARDRAIL_BLOCKED',
                     'time_ms' => 0,
                     'results' => []
                 ],
                 'confidence' => 1.0,
                 'explanation' => 'Execution blocked by guardrails: ' . $guardrailResult['reason'],
                 'visualization_type' => $savedQuery->result_visualization_type,
+                'request_id' => $requestId,
                 'status_code' => 200,
             ];
         }
@@ -234,6 +241,7 @@ class SavedQueryExecutionService
         $schemaResult = $this->schemaValidator->validate($sql, $customerSchema, $driver);
         if (!$schemaResult['valid']) {
             QueryLog::create([
+                'request_id' => $requestId,
                 'user_id' => $userId,
                 'company_id' => $companyId,
                 'database_connection_id' => $savedQuery->database_connection_id,
@@ -243,6 +251,8 @@ class SavedQueryExecutionService
                 'passed_guardrails' => true,
                 'execution_status' => 'failed',
                 'error_message' => 'Schema validation failed: ' . $schemaResult['reason'],
+                'error_code' => 'SCHEMA_VALIDATION_FAILED',
+                'risk_level' => 'medium',
                 'confidence_score' => 1.0,
             ]);
 
@@ -259,12 +269,14 @@ class SavedQueryExecutionService
                 'execution' => [
                     'success' => false,
                     'error' => 'Schema validation failed: ' . $schemaResult['reason'],
+                    'error_code' => 'SCHEMA_VALIDATION_FAILED',
                     'time_ms' => 0,
                     'results' => []
                 ],
                 'confidence' => 1.0,
                 'explanation' => 'Schema validation failed: ' . $schemaResult['reason'] . '. The database schema may have changed since this query was saved.',
                 'visualization_type' => $savedQuery->result_visualization_type,
+                'request_id' => $requestId,
                 'status_code' => 200,
             ];
         }
@@ -288,6 +300,7 @@ class SavedQueryExecutionService
 
         // 7. Tenant-safe Audit Logging with specified source
         QueryLog::create([
+            'request_id' => $requestId,
             'user_id' => $userId,
             'company_id' => $companyId,
             'database_connection_id' => $savedQuery->database_connection_id,
@@ -297,7 +310,11 @@ class SavedQueryExecutionService
             'passed_guardrails' => true,
             'execution_status' => $executionResult['success'] ? 'success' : 'failed',
             'execution_time_ms' => $executionResult['time_ms'],
+            'rows_returned' => $executionResult['returned_rows'] ?? count($executionResult['results']),
+            'truncated' => $executionResult['truncated'] ?? false,
+            'risk_level' => $interpretation['risk_level'] ?? 'low',
             'error_message' => $executionResult['error'],
+            'error_code' => $executionResult['error_code'] ?? null,
             'confidence_score' => 1.0,
         ]);
 
@@ -319,8 +336,13 @@ class SavedQueryExecutionService
             'execution' => [
                 'success' => $executionResult['success'],
                 'error' => $executionResult['error'],
+                'error_code' => $executionResult['error_code'] ?? null,
                 'time_ms' => $executionResult['time_ms'],
-                'results' => $executionResult['results']
+                'results' => $executionResult['results'],
+                'truncated' => $executionResult['truncated'] ?? false,
+                'returned_rows' => $executionResult['returned_rows'] ?? count($executionResult['results']),
+                'limit' => $executionResult['limit'] ?? 1000,
+                'total_rows' => $executionResult['total_rows'] ?? count($executionResult['results']),
             ],
             'confidence' => 1.0,
             'explanation' => "Re-executed saved query: {$savedQuery->name}",
@@ -332,6 +354,7 @@ class SavedQueryExecutionService
             'filter_status' => $filterStatus,
             'filter_message' => $filterMessage,
             'cache_hit' => false,
+            'request_id' => $requestId,
             'status_code' => 200,
         ];
 

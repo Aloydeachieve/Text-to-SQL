@@ -22,6 +22,7 @@ import { DashboardDetail } from './components/dashboard/DashboardDetail';
 import { CreateDashboardModal } from './components/dashboard/CreateDashboardModal';
 import { AddWidgetModal } from './components/dashboard/AddWidgetModal';
 import { TeamView } from './components/team/TeamView';
+import { SemanticManagement } from './components/semantic/SemanticManagement';
 import {
   submitQuery,
   fetchHistory,
@@ -50,7 +51,7 @@ import {
 } from './services/api';
 
 export default function Dashboard() {
-  const [activeView, setActiveView] = useState<'workspace' | 'saved_queries' | 'dashboards' | 'team'>('workspace');
+  const [activeView, setActiveView] = useState<'workspace' | 'saved_queries' | 'dashboards' | 'team' | 'semantic'>('workspace');
   
   const [history, setHistory] = useState<HistoryItem[]>([]);
   const [isHistoryLoading, setIsHistoryLoading] = useState(false);
@@ -419,6 +420,10 @@ export default function Dashboard() {
               currentUser={currentUser}
               onOpenAuthModal={() => setIsConnectionsModalOpen(true)}
             />
+          ) : activeView === 'semantic' ? (
+            <SemanticManagement
+              currentUser={currentUser}
+            />
           ) : activeView === 'dashboards' ? (
             activeDashboard ? (
               <DashboardDetail
@@ -640,7 +645,7 @@ export default function Dashboard() {
                             &ldquo;{activeResult.question}&rdquo;
                           </h2>
                           {activeResult.explanation && (
-                            <p className="text-sm text-slate-350 leading-relaxed pt-2 border-t border-slate-800/40">
+                            <p className="text-sm text-slate-300 leading-relaxed pt-2 border-t border-slate-800/40">
                               {activeResult.explanation}
                             </p>
                           )}
@@ -654,16 +659,16 @@ export default function Dashboard() {
                         {activeResult.schema_validation && (
                           <div className={`p-4 rounded-xl border flex items-start space-x-3 transition-all duration-200 ${
                             activeResult.schema_validation.valid
-                              ? 'bg-blue-500/10 border-blue-500/20 text-blue-405'
-                              : 'bg-rose-500/10 border-rose-500/20 text-rose-450'
+                              ? 'bg-blue-500/10 border-blue-500/20 text-blue-400'
+                              : 'bg-rose-500/10 border-rose-500/20 text-rose-400'
                           }`}>
                             <div className="mt-0.5 shrink-0">
                               {activeResult.schema_validation.valid ? (
-                                <svg className="w-5 h-5 text-blue-450" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                <svg className="w-5 h-5 text-blue-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z" />
                                 </svg>
                               ) : (
-                                <svg className="w-5 h-5 text-rose-450" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                <svg className="w-5 h-5 text-rose-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
                                 </svg>
                               )}
@@ -672,7 +677,7 @@ export default function Dashboard() {
                               <h4 className="text-xs font-bold uppercase tracking-wider">
                                 {activeResult.schema_validation.valid ? 'Schema Verified' : 'Schema Failed'}
                               </h4>
-                              <p className="text-xs text-slate-350 leading-relaxed">
+                              <p className="text-xs text-slate-300 leading-relaxed">
                                 {activeResult.schema_validation.valid
                                   ? 'All referenced database objects exist.'
                                   : activeResult.schema_validation.reason || 'Query references unknown columns or tables.'}
@@ -696,6 +701,10 @@ export default function Dashboard() {
                         suggestions={activeResult.suggestions}
                         relevantSchema={activeResult.relevant_schema}
                         onSelectSuggestion={(suggestion) => handleQuerySubmit(suggestion)}
+                        requestId={activeResult.request_id}
+                        riskLevel={activeResult.risk_level || activeResult.semantic_validation?.risk_level}
+                        riskReasons={activeResult.risk_reasons || activeResult.semantic_validation?.risk_reasons}
+                        execution={activeResult.execution}
                       />
 
                       {/* SQL Code Workspace Editor */}
@@ -736,7 +745,7 @@ export default function Dashboard() {
                       </div>
                       <div className="space-y-1 max-w-sm">
                         <h3 className="text-sm font-semibold text-slate-300">No Query Executed</h3>
-                        <p className="text-xs text-slate-550 leading-relaxed">
+                        <p className="text-xs text-slate-400 leading-relaxed">
                           Type a natural language question in the box above or select one of the Quick Start prompts to query the connected database.
                         </p>
                       </div>

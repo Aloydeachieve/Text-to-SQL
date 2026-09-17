@@ -1,7 +1,9 @@
 'use client';
 
 import React from 'react';
-import { SemanticValidationInfo, RelevantSchemaInfo } from '../../services/api';
+import { SemanticValidationInfo, RelevantSchemaInfo, ExecutionInfo } from '../../services/api';
+import { SemanticWarnings } from '../semantic/SemanticWarnings';
+import { RequestIdBadge } from '../system/RequestIdBadge';
 
 interface QueryIntentCardProps {
   info?: SemanticValidationInfo | null;
@@ -12,6 +14,10 @@ interface QueryIntentCardProps {
   suggestions?: string[];
   relevantSchema?: RelevantSchemaInfo | null;
   onSelectSuggestion?: (suggestion: string) => void;
+  requestId?: string | null;
+  riskLevel?: 'low' | 'medium' | 'high';
+  riskReasons?: string[];
+  execution?: ExecutionInfo | null;
 }
 
 export function QueryIntentCard({
@@ -23,6 +29,10 @@ export function QueryIntentCard({
   suggestions = [],
   relevantSchema = null,
   onSelectSuggestion,
+  requestId = null,
+  riskLevel,
+  riskReasons = [],
+  execution = null,
 }: QueryIntentCardProps) {
   // 1. Ambiguous Query Clarification State
   if (isAmbiguous) {
@@ -124,6 +134,8 @@ export function QueryIntentCard({
   } = info;
 
   const percentage = Math.round((score ?? 1) * 100);
+  const effectiveRiskLevel = riskLevel || info.risk_level;
+  const effectiveRiskReasons = riskReasons.length > 0 ? riskReasons : (info.risk_reasons || []);
 
   return (
     <div
@@ -181,6 +193,26 @@ export function QueryIntentCard({
             </span>
           )}
 
+          {effectiveRiskLevel && (
+            <span
+              className={`px-2 py-0.5 rounded-full text-[10px] font-semibold border flex items-center gap-1.5 ${
+                effectiveRiskLevel === 'high'
+                  ? 'bg-rose-950/50 border-rose-500/40 text-rose-300'
+                  : effectiveRiskLevel === 'medium'
+                  ? 'bg-amber-950/50 border-amber-500/40 text-amber-300'
+                  : 'bg-emerald-950/50 border-emerald-500/30 text-emerald-300'
+              }`}
+              title={effectiveRiskReasons.length > 0 ? effectiveRiskReasons.join('; ') : `${effectiveRiskLevel.toUpperCase()} Complexity Risk`}
+            >
+              <span className={`w-1.5 h-1.5 rounded-full ${
+                effectiveRiskLevel === 'high' ? 'bg-rose-400 animate-pulse' : effectiveRiskLevel === 'medium' ? 'bg-amber-400' : 'bg-emerald-400'
+              }`} />
+              {effectiveRiskLevel.toUpperCase()} RISK
+            </span>
+          )}
+
+          <RequestIdBadge requestId={requestId} compact />
+
           {!valid ? (
             <span className="px-2.5 py-0.5 rounded-full text-[11px] font-bold tracking-wide bg-rose-500/20 text-rose-300 border border-rose-500/30">
               Execution Blocked
@@ -201,6 +233,32 @@ export function QueryIntentCard({
           )}
         </div>
       </div>
+
+      {/* Truncation Notice Banner */}
+      {execution?.truncated && (
+        <div className="flex items-center gap-2.5 p-3 rounded-xl bg-amber-950/30 border border-amber-500/30 text-amber-200 text-xs">
+          <span className="font-bold text-amber-400 uppercase tracking-wider text-[10px] py-0.5 px-2 rounded bg-amber-500/20 border border-amber-500/30 shrink-0">
+            Truncated
+          </span>
+          <p className="leading-relaxed">
+            Query returned more than <strong>{execution.limit ?? 1000}</strong> rows. Result set is capped to safeguard browser memory and response time.
+          </p>
+        </div>
+      )}
+
+      {/* Query Complexity Advisory Banner */}
+      {effectiveRiskReasons.length > 0 && effectiveRiskLevel !== 'low' && (
+        <div className="p-3 rounded-xl bg-slate-950/50 border border-amber-500/30 text-xs space-y-1.5">
+          <span className="text-[10px] font-bold uppercase tracking-wider text-amber-400 flex items-center gap-1.5">
+            ⚠ Complexity Advisory ({effectiveRiskReasons.length}):
+          </span>
+          <ul className="list-disc list-inside space-y-1 text-slate-300 text-[11px]">
+            {effectiveRiskReasons.map((reason, idx) => (
+              <li key={idx} className="leading-relaxed">{reason}</li>
+            ))}
+          </ul>
+        </div>
+      )}
 
       {/* Question & AI Interpretation Context */}
       <div className="bg-slate-950/40 p-3.5 rounded-xl border border-slate-800/80 space-y-2 text-xs">
@@ -332,6 +390,102 @@ export function QueryIntentCard({
           </div>
         </div>
       </div>
+
+      {/* Phase 9: Business Semantic Layer Intelligence */}
+      {(info.metric || info.semantic_confidence || info.source_of_truth !== undefined || (info.required_filters && info.required_filters.length > 0)) && (
+        <div className="p-4 rounded-xl border border-emerald-500/30 bg-emerald-950/20 text-emerald-200 space-y-3">
+          <div className="flex items-center justify-between border-b border-emerald-500/20 pb-2 flex-wrap gap-2">
+            <div className="flex items-center space-x-2">
+              <span className="text-base">🧠</span>
+              <span className="text-xs font-bold uppercase tracking-wider text-emerald-300">
+                Business Semantics & Source-of-Truth
+              </span>
+            </div>
+
+            <div className="flex items-center space-x-2">
+              {info.semantic_confidence && (
+                <span
+                  className={`text-[10px] font-bold px-2 py-0.5 rounded-full border uppercase tracking-wider ${
+                    info.semantic_confidence === 'HIGH'
+                      ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40'
+                      : info.semantic_confidence === 'MEDIUM'
+                      ? 'bg-amber-500/20 text-amber-300 border-amber-500/40'
+                      : 'bg-rose-500/20 text-rose-300 border-rose-500/40'
+                  }`}
+                >
+                  {info.semantic_confidence} Confidence
+                </span>
+              )}
+
+              {info.source_of_truth ? (
+                <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-amber-500/20 text-amber-300 border border-amber-500/30">
+                  ✓ Configured Company Source
+                </span>
+              ) : info.metric ? (
+                <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-amber-500/20 text-amber-300 border border-amber-500/30">
+                  ⚠ Non-canonical Source
+                </span>
+              ) : null}
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-3 text-xs">
+            {info.metric && (
+              <div className="bg-slate-950/60 p-2.5 rounded-lg border border-emerald-500/20">
+                <span className="text-[10px] font-bold uppercase text-slate-400 block mb-0.5">
+                  Business Metric:
+                </span>
+                <span className="font-bold text-emerald-300 text-xs">
+                  {info.metric}
+                </span>
+              </div>
+            )}
+
+            {info.metric_source && (
+              <div className="bg-slate-950/60 p-2.5 rounded-lg border border-emerald-500/20">
+                <span className="text-[10px] font-bold uppercase text-slate-400 block mb-0.5">
+                  Canonical Source:
+                </span>
+                <span className="font-mono text-emerald-300 text-xs font-semibold">
+                  {info.metric_source}.{info.metric_column || '*'}
+                </span>
+              </div>
+            )}
+
+            {info.aggregation && (
+              <div className="bg-slate-950/60 p-2.5 rounded-lg border border-emerald-500/20">
+                <span className="text-[10px] font-bold uppercase text-slate-400 block mb-0.5">
+                  Required Aggregation:
+                </span>
+                <span className="font-mono text-indigo-300 text-xs font-semibold">
+                  {info.aggregation}()
+                </span>
+              </div>
+            )}
+
+            {info.required_filters && info.required_filters.length > 0 && (
+              <div className="bg-slate-950/60 p-2.5 rounded-lg border border-emerald-500/20">
+                <span className="text-[10px] font-bold uppercase text-slate-400 block mb-0.5">
+                  Required Filter:
+                </span>
+                <span className="font-mono text-amber-300 text-[11px] truncate block" title={info.required_filters.join(' AND ')}>
+                  {info.required_filters.join(' AND ')}
+                </span>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Structured Semantic Warnings */}
+      {info.semantic_warnings && info.semantic_warnings.length > 0 && (
+        <div className="space-y-1.5 pt-1">
+          <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400 block">
+            Semantic Intelligence Alerts:
+          </span>
+          <SemanticWarnings warnings={info.semantic_warnings} />
+        </div>
+      )}
 
       {/* ⚠ Potential multiplication risk alert callout */}
       {multiplication_risk?.detected && (

@@ -12,8 +12,13 @@ export interface GuardrailsInfo {
 export interface ExecutionInfo {
   success: boolean;
   error: string | null;
+  error_code?: string | null;
   time_ms: number;
   results: Array<Record<string, unknown>>;
+  truncated?: boolean;
+  returned_rows?: number;
+  limit?: number;
+  total_rows?: number;
 }
 
 export interface SchemaValidationInfo {
@@ -27,6 +32,16 @@ export interface MultiplicationRiskInfo {
   details?: string;
   recommendation?: string;
 }
+
+export interface SemanticWarning {
+  type: string;
+  severity: 'warning' | 'info' | 'critical';
+  table?: string;
+  message: string;
+  suggestion?: string;
+}
+
+export type SemanticConfidence = 'HIGH' | 'MEDIUM' | 'LOW';
 
 export interface SemanticValidationInfo {
   valid: boolean;
@@ -42,6 +57,18 @@ export interface SemanticValidationInfo {
   grain?: string;
   aggregations?: string[];
   multiplication_risk?: MultiplicationRiskInfo | null;
+  risk_level?: 'low' | 'medium' | 'high';
+  risk_reasons?: string[];
+  // Phase 9 Business Semantics & Source-of-Truth
+  metric?: string | null;
+  metric_id?: number | null;
+  metric_source?: string | null;
+  metric_column?: string | null;
+  aggregation?: string | null;
+  required_filters?: string[];
+  source_of_truth?: boolean;
+  semantic_confidence?: SemanticConfidence;
+  semantic_warnings?: SemanticWarning[];
 }
 
 export interface RelevantSchemaInfo {
@@ -69,6 +96,10 @@ export interface QueryResponse {
   saved_query_id?: number;
   saved_query_name?: string;
   target_database_name?: string | null;
+  risk_level?: 'low' | 'medium' | 'high';
+  risk_reasons?: string[];
+  request_id?: string;
+  error_code?: string;
 }
 
 export interface HistoryItem {
@@ -281,6 +312,17 @@ export interface SaveConnectionParams extends TestConnectionParams {
   name: string;
 }
 
+export interface DatabaseConnectionHealth {
+  id: number;
+  name: string;
+  driver: 'mysql' | 'pgsql';
+  healthy: boolean;
+  status: 'healthy' | 'timeout' | 'authentication_failed' | 'unavailable' | 'unhealthy';
+  latency_ms: number;
+  message: string;
+  timestamp: string;
+}
+
 export function getStoredToken(): string | null {
   if (typeof window === 'undefined') return null;
   return localStorage.getItem('tts_auth_token');
@@ -452,6 +494,21 @@ export async function deleteDatabaseConnection(id: number): Promise<void> {
   }
 }
 
+export async function checkDatabaseConnectionHealth(id: number): Promise<DatabaseConnectionHealth> {
+  const res = await fetch(`${API_URL}/database-connections/${id}/health`, {
+    method: 'GET',
+    headers: getAuthHeaders(),
+    cache: 'no-store',
+  });
+
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    throw new Error(body.message || `Health check failed: HTTP ${res.status}`);
+  }
+
+  return body.data;
+}
+
 export async function fetchConnectionSchema(id: number): Promise<SchemaDetails> {
   const res = await fetch(`${API_URL}/database-connections/${id}/schema`, {
     method: 'GET',
@@ -481,6 +538,8 @@ export interface SavedQuery {
   dialect: string;
   result_visualization_type: 'table' | 'bar' | 'line' | 'none' | null;
   visibility: ResourceVisibility;
+  metric_id?: number | null;
+  semantic_snapshot?: Record<string, unknown> | null;
   is_owner?: boolean;
   can_edit?: boolean;
   created_at: string;
@@ -1018,3 +1077,375 @@ export async function removeCompanyMember(memberId: number): Promise<void> {
     throw new Error(err.message || 'Failed to remove team member.');
   }
 }
+
+/* =========================================================================
+   Phase 9: Business Semantic Intelligence, Metric Definitions & Data Lineage
+   ========================================================================= */
+
+export interface SemanticMetric {
+  id: number;
+  company_id: number;
+  name: string;
+  slug: string;
+  description: string | null;
+  definition: string;
+  source_table: string;
+  source_column: string;
+  aggregation: 'SUM' | 'COUNT' | 'AVG' | 'MIN' | 'MAX' | 'COUNT_DISTINCT';
+  filter_condition: string | null;
+  date_column: string | null;
+  is_active: boolean;
+  is_source_of_truth: boolean;
+  created_by?: number;
+  updated_by?: number;
+  creator?: { id: number; name: string; email: string };
+  updater?: { id: number; name: string; email: string };
+  terms_count?: number;
+  saved_queries_count?: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export type SemanticTermTargetType = 'metric' | 'table' | 'column' | 'filter' | 'concept';
+
+export interface SemanticTerm {
+  id: number;
+  company_id: number;
+  term: string;
+  metric_id: number | null;
+  target_type: SemanticTermTargetType;
+  target_name: string;
+  definition: string | null;
+  metric?: SemanticMetric | null;
+  creator?: { id: number; name: string; email: string };
+  created_at: string;
+  updated_at: string;
+}
+
+export type TableClassificationType = 'business' | 'staging' | 'archive' | 'test' | 'internal' | 'unknown';
+
+export interface TableClassification {
+  id: number;
+  company_id: number;
+  table_name: string;
+  classification: TableClassificationType;
+  description: string | null;
+  is_preferred_source: boolean;
+  preferred_for_concept: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface LineageNode {
+  id: string;
+  label: string;
+  type: 'metric' | 'table' | 'column' | 'filter' | 'date_column';
+  aggregation?: string;
+  definition?: string;
+  is_source_of_truth?: boolean;
+  classification?: string;
+  is_preferred_source?: boolean;
+  column?: string;
+  table?: string;
+  condition?: string;
+}
+
+export interface LineageEdge {
+  source: string;
+  target: string;
+  label: string;
+}
+
+export interface LineageGraphData {
+  nodes: LineageNode[];
+  edges: LineageEdge[];
+}
+
+export interface SemanticDriftChange {
+  field: string;
+  original: string;
+  current: string;
+}
+
+export interface SemanticDriftResult {
+  has_drift: boolean;
+  metric_id: number;
+  metric_name: string;
+  reason: string | null;
+  changes: SemanticDriftChange[];
+}
+
+export interface CreateMetricParams {
+  name: string;
+  slug?: string;
+  description?: string | null;
+  definition: string;
+  source_table: string;
+  source_column: string;
+  aggregation: string;
+  filter_condition?: string | null;
+  date_column?: string | null;
+  is_active?: boolean;
+  is_source_of_truth?: boolean;
+}
+
+export interface UpdateMetricParams {
+  name?: string;
+  slug?: string;
+  description?: string | null;
+  definition?: string;
+  source_table?: string;
+  source_column?: string;
+  aggregation?: string;
+  filter_condition?: string | null;
+  date_column?: string | null;
+  is_active?: boolean;
+  is_source_of_truth?: boolean;
+}
+
+export interface CreateTermParams {
+  term: string;
+  metric_id?: number | null;
+  target_type: SemanticTermTargetType;
+  target_name: string;
+  definition?: string | null;
+}
+
+export interface UpdateTermParams {
+  term?: string;
+  metric_id?: number | null;
+  target_type?: SemanticTermTargetType;
+  target_name?: string;
+  definition?: string | null;
+}
+
+export interface SaveClassificationParams {
+  table_name: string;
+  classification: TableClassificationType;
+  description?: string | null;
+  is_preferred_source?: boolean;
+  preferred_for_concept?: string | null;
+}
+
+// 1. Metrics API
+export async function fetchSemanticMetrics(search?: string, activeOnly = false): Promise<SemanticMetric[]> {
+  const params = new URLSearchParams();
+  if (search) params.append('search', search);
+  if (activeOnly) params.append('active_only', '1');
+
+  const queryStr = params.toString() ? `?${params.toString()}` : '';
+  const res = await fetch(`${API_URL}/semantic/metrics${queryStr}`, {
+    method: 'GET',
+    headers: getAuthHeaders(),
+    cache: 'no-store',
+  });
+
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.message || `Failed to fetch business metrics: HTTP ${res.status}`);
+  }
+
+  const body = await res.json();
+  return body.data || [];
+}
+
+export async function fetchSemanticMetric(id: number): Promise<SemanticMetric> {
+  const res = await fetch(`${API_URL}/semantic/metrics/${id}`, {
+    method: 'GET',
+    headers: getAuthHeaders(),
+    cache: 'no-store',
+  });
+
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.message || `Failed to fetch metric: HTTP ${res.status}`);
+  }
+
+  const body = await res.json();
+  return body.data;
+}
+
+export async function createSemanticMetric(params: CreateMetricParams): Promise<SemanticMetric> {
+  const res = await fetch(`${API_URL}/semantic/metrics`, {
+    method: 'POST',
+    headers: getAuthHeaders(),
+    body: JSON.stringify(params),
+  });
+
+  const body = await res.json();
+  if (!res.ok) {
+    throw new Error(body.message || 'Failed to create business metric.');
+  }
+
+  return body.data;
+}
+
+export async function updateSemanticMetric(id: number, params: UpdateMetricParams): Promise<SemanticMetric> {
+  const res = await fetch(`${API_URL}/semantic/metrics/${id}`, {
+    method: 'PATCH',
+    headers: getAuthHeaders(),
+    body: JSON.stringify(params),
+  });
+
+  const body = await res.json();
+  if (!res.ok) {
+    throw new Error(body.message || 'Failed to update business metric.');
+  }
+
+  return body.data;
+}
+
+export async function deleteSemanticMetric(id: number): Promise<void> {
+  const res = await fetch(`${API_URL}/semantic/metrics/${id}`, {
+    method: 'DELETE',
+    headers: getAuthHeaders(),
+  });
+
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.message || 'Failed to delete business metric.');
+  }
+}
+
+// 2. Terms API
+export async function fetchSemanticTerms(): Promise<SemanticTerm[]> {
+  const res = await fetch(`${API_URL}/semantic/terms`, {
+    method: 'GET',
+    headers: getAuthHeaders(),
+    cache: 'no-store',
+  });
+
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.message || `Failed to fetch semantic terms: HTTP ${res.status}`);
+  }
+
+  const body = await res.json();
+  return body.data || [];
+}
+
+export async function createSemanticTerm(params: CreateTermParams): Promise<SemanticTerm> {
+  const res = await fetch(`${API_URL}/semantic/terms`, {
+    method: 'POST',
+    headers: getAuthHeaders(),
+    body: JSON.stringify(params),
+  });
+
+  const body = await res.json();
+  if (!res.ok) {
+    throw new Error(body.message || 'Failed to create business term mapping.');
+  }
+
+  return body.data;
+}
+
+export async function updateSemanticTerm(id: number, params: UpdateTermParams): Promise<SemanticTerm> {
+  const res = await fetch(`${API_URL}/semantic/terms/${id}`, {
+    method: 'PATCH',
+    headers: getAuthHeaders(),
+    body: JSON.stringify(params),
+  });
+
+  const body = await res.json();
+  if (!res.ok) {
+    throw new Error(body.message || 'Failed to update business term mapping.');
+  }
+
+  return body.data;
+}
+
+export async function deleteSemanticTerm(id: number): Promise<void> {
+  const res = await fetch(`${API_URL}/semantic/terms/${id}`, {
+    method: 'DELETE',
+    headers: getAuthHeaders(),
+  });
+
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.message || 'Failed to delete business term mapping.');
+  }
+}
+
+// 3. Table Classifications API
+export async function fetchTableClassifications(): Promise<TableClassification[]> {
+  const res = await fetch(`${API_URL}/semantic/table-classifications`, {
+    method: 'GET',
+    headers: getAuthHeaders(),
+    cache: 'no-store',
+  });
+
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.message || `Failed to fetch table classifications: HTTP ${res.status}`);
+  }
+
+  const body = await res.json();
+  return body.data || [];
+}
+
+export async function saveTableClassification(params: SaveClassificationParams): Promise<TableClassification> {
+  const res = await fetch(`${API_URL}/semantic/table-classifications`, {
+    method: 'POST',
+    headers: getAuthHeaders(),
+    body: JSON.stringify(params),
+  });
+
+  const body = await res.json();
+  if (!res.ok) {
+    throw new Error(body.message || 'Failed to save table classification.');
+  }
+
+  return body.data;
+}
+
+export async function deleteTableClassification(id: number): Promise<void> {
+  const res = await fetch(`${API_URL}/semantic/table-classifications/${id}`, {
+    method: 'DELETE',
+    headers: getAuthHeaders(),
+  });
+
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.message || 'Failed to delete table classification.');
+  }
+}
+
+// 4. Data Lineage API
+export async function fetchLineageGraph(metricId?: number, databaseConnectionId?: number): Promise<LineageGraphData> {
+  const params = new URLSearchParams();
+  if (metricId) params.append('metric_id', String(metricId));
+  if (databaseConnectionId) params.append('database_connection_id', String(databaseConnectionId));
+
+  const queryStr = params.toString() ? `?${params.toString()}` : '';
+  const res = await fetch(`${API_URL}/semantic/lineage${queryStr}`, {
+    method: 'GET',
+    headers: getAuthHeaders(),
+    cache: 'no-store',
+  });
+
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.message || `Failed to fetch data lineage graph: HTTP ${res.status}`);
+  }
+
+  const body = await res.json();
+  return body.data || { nodes: [], edges: [] };
+}
+
+// 5. Semantic Drift API
+export async function checkSemanticDrift(savedQueryId: number): Promise<SemanticDriftResult> {
+  const res = await fetch(`${API_URL}/semantic/drift/${savedQueryId}`, {
+    method: 'GET',
+    headers: getAuthHeaders(),
+    cache: 'no-store',
+  });
+
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.message || `Failed to check semantic drift: HTTP ${res.status}`);
+  }
+
+  const body = await res.json();
+  return body.data;
+}
+

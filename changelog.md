@@ -2,6 +2,131 @@
 
 All notable changes to the "Text-to-SQL Interface with Guardrails" project will be documented in this file.
 
+## [0.17.0] - 2026-09-17
+### Added (Phase 11 — Product Polish, Release Preparation & GitHub Readiness)
+- **Repository Security & Credential Isolation Audit**:
+  - Performed comprehensive audit across all repository files for sensitive credentials, Gemini API keys, passwords, bearer tokens, and connection strings.
+  - Confirmed 0 secrets committed in Git history and 0 secrets in tracked source.
+  - Hardened `.gitignore` files at repository root and in `frontend/` to strictly ignore all `.env*` variants (`.env`, `.env.local`, `.env.*.local`) while explicitly preserving `.env.example` templates (`!.env.example`, `!.env.*.example`).
+  - Rewrote and documented `backend/.env.example` and `frontend/.env.example` with comprehensive explanations for all environment variables (App URLs, Database options, Gemini AI settings, CORS origins, rate limits, query row caps, session timeouts, and health probe configurations) without embedding actual secrets.
+- **Portfolio-Grade Documentation Overhaul (`README.md`)**:
+  - Restructured `README.md` into an engineering showcase document addressing the fundamental premise: *"Can we trust the answer?"*
+  - Documented real-world Text-to-SQL failure modes (destructive SQL, valid SQL producing wrong business numbers, join/grain fan-out multiplication, staging/archive table contamination, and runaway query denial of service) and corresponding architectural defenses.
+  - Added full end-to-end Mermaid architecture diagram mapping Frontend (Next.js 16, React 19, Tailwind CSS v4), Backend SaaS Gateway (Laravel 12 API, Sanctum), Query Intelligence & Semantic Pipeline, Multi-Tier Verification Gateway, and Isolated Read-Only Database Execution.
+  - Documented the 10-step layered execution pipeline, three-tier RBAC permissions matrix (Admin, Analyst, Viewer), complete REST API endpoint catalog, and transparent engineering limitations.
+  - Added concrete walkthrough demo scenario illustrating why vanilla AI fails on *"What was our total revenue last month?"* and how company-scoped canonical metrics with mandatory filters enforce business correctness.
+  - Curated guide for the 6 key application demonstration screens.
+- **Frontend UI & Accessibility Polish**:
+  - Standardized Tailwind CSS v4 color tokens across components in `frontend/app/page.tsx` (corrected non-standard color classes to design-system palette tokens).
+  - Enhanced application metadata in `frontend/app/layout.tsx` to showcase the full multi-tenant analytics SaaS platform.
+  - Audited empty states, loading indicators, error banners, and view transitions across Workspace, Saved Queries, Dashboards, Team, and Semantic Model management.
+- **Automated Regression Verification & Baseline Preservation**:
+  - Full backend test suite executed: **152 tests passed, 1,550 assertions, 0 failures** (Duration: 22.4s).
+  - Frontend static verification: **ESLint: 0 errors, 0 warnings**; **TypeScript: 0 compiler errors**.
+  - Production build verification: Next.js 16 (Turbopack) successfully compiled and optimized all static and dynamic routes.
+- **GitHub Readiness Verification**:
+  - Verified clean Git working directory state with no temporary artifacts, debug dumps (`dd`, `dump`, `var_dump`), or unneeded files.
+  - Prepared repository for final commit and release tag. Automatic remote push suppressed in accordance with project boundaries.
+
+## [0.16.0] - 2026-09-16
+### Added (Phase 10 — Production Reliability & Observability)
+- **Production Resilience & Fault Isolation Philosophy**:
+  - A production Text-to-SQL multi-tenant SaaS platform must maintain strict uptime, protect AI and database budgets from runaway queries, isolate customer database downtime from platform availability, and provide immediate telemetry for support diagnostics.
+  - Phase 10 implements enterprise-grade reliability and observability safeguards across backend execution and frontend interfaces.
+- **Configurable Rate Limiting Architecture (`reliability.php` & `AppServiceProvider`)**:
+  - Independent, named rate limiters across key traffic profiles:
+    - `api`: 120 req/min for standard authenticated tenant endpoints.
+    - `ai-generation`: 20 req/min guarding Gemini/LLM inference quotas from cost spikes.
+    - `query-execution`: 30 req/min for direct and saved query runs, protecting customer databases.
+    - `auth`: 10 req/min on login and registration endpoints preventing credential stuffing.
+  - Standard HTTP 429 response structure with `error_code: 'RATE_LIMITED'`, `retry_after`, and `X-Request-ID`.
+- **Query Execution Session Timeouts & Result Truncation (`SqlExecutorService`)**:
+  - Driver-level session execution timeouts (`SET SESSION max_execution_time` for MySQL, `statement_timeout` for PostgreSQL) preventing unkillable query locks.
+  - Database error classification distinguishing `DATABASE_QUERY_TIMEOUT` from other database exceptions.
+  - Result size protection (`QUERY_MAX_ROWS`, default 1,000; `EXPORT_MAX_ROWS`, default 5,000). Oversized query results are truncated safely with `truncated: true`, `returned_rows`, `limit`, and `total_rows` metadata.
+- **Query Complexity Risk Detection (`QueryInterpretationService`)**:
+  - Analyzes AST and SQL query structures for complexity risks:
+    - Unbounded `SELECT *` without `LIMIT` (flagged with browser performance advisory).
+    - Cartesian products (`CROSS JOIN` or comma joins without explicit `ON` conditions flagged with `risk_level: 'high'`).
+    - Excessive joins (>4 table joins) and unfiltered multi-table joins.
+  - Returns `risk_level` (`low`, `medium`, `high`) and actionable `risk_reasons`.
+- **End-to-End Request Correlation (`X-Request-ID` & `RequestIdMiddleware`)**:
+  - Global API middleware generating or sanitizing `X-Request-ID` headers.
+  - Binds request ID to Laravel Log Context (`Log::withContext`) across all application logs.
+  - Emitted in HTTP response headers and recorded in `query_logs` table.
+- **Production-Safe Error Handling & Classification (`bootstrap/app.php`)**:
+  - When `APP_DEBUG=false`, internal 500 exceptions are masked into sanitized JSON envelopes (`error_code: 'INTERNAL_ERROR'`) with `request_id`, suppressing raw database passwords, internal IPs, and stack traces.
+  - Client errors (400–499) return standardized error codes (`AUTHENTICATION_ERROR`, `AUTHORIZATION_ERROR`, `NOT_FOUND`, `VALIDATION_ERROR`, `RATE_LIMITED`).
+- **Operational Health & Readiness Probes (`HealthController`)**:
+  - `GET /api/health`: Lightweight HTTP liveness probe responding with system status and timestamp.
+  - `GET /api/ready`: Readiness probe verifying primary database connectivity and cache responsiveness. Customer databases are strictly excluded to ensure third-party downtime never marks the SaaS application unhealthy.
+- **Customer Database Health & Latency Probing (`DatabaseConnectionManager`)**:
+  - Active probe endpoint `GET /api/v1/database-connections/{id}/health` executing low-overhead probe queries with a 3-second probe timeout.
+  - Measures latency in milliseconds and sanitizes error responses into standardized statuses (`healthy`, `timeout`, `authentication_failed`, `unavailable`, `unhealthy`).
+  - Enforces tenant isolation and role permissions (Admin and Analyst permitted; Viewer forbidden).
+- **Frontend Reliability & Observability UI**:
+  - **`RequestIdBadge.tsx`**: Lightweight, copy-to-clipboard correlation badge displaying `req_...` with visual feedback.
+  - **`QueryIntentCard.tsx`**: Renders complexity risk badges (`LOW / MEDIUM / HIGH RISK`), complexity advisories, truncation warning banners, and request correlation badges.
+  - **`ResultTable.tsx`**: Displays warning banner when result sets are truncated, with record count and latency telemetry.
+  - **`DatabaseConnectionModal.tsx`**: Interactive "Check Health" button for customer connections displaying live ping latency and health status badges.
+- **Automated Tests & Quality Baseline**:
+  - Created `ReliabilityAndObservabilityTest.php` with 9 comprehensive feature tests (50 assertions).
+  - Full test suite passes: 152 tests, 1,550 assertions, 0 failures.
+  - Frontend: 0 TypeScript errors, 0 ESLint errors, successful Next.js production build.
+
+## [0.15.0] - 2026-09-15
+### Added (Phase 9 — Business Semantic Intelligence, Metric Definitions & Data Lineage)
+- **The Core Problem Solved — Valid SQL vs. Correct Business Answers**:
+  - A SQL query can be 100% syntactically valid and run against a database without error, yet produce a completely **wrong business answer**.
+  - Examples addressed:
+    - Running `SELECT SUM(amount) FROM payments` includes failed, pending, or refunded transactions, overstating company revenue unless constrained by `WHERE status = 'completed'`.
+    - Querying `staging_orders` or `archived_orders` instead of canonical production `orders` produces inaccurate or stale operational reports.
+    - Ambiguous terms like "active customers" or "churn" lead to conflicting SQL interpretations across analysts.
+  - Phase 9 introduces a company-scoped Business Semantic Layer ensuring AI-generated and custom SQL aligns strictly with company-defined business truth.
+- **Canonical Business Metric Engine (`SemanticMetric` Model & Migration)**:
+  - Schema: `semantic_metrics` (`company_id`, `name`, `slug`, `description`, `definition`, `source_table`, `source_column`, `aggregation`, `filter_condition`, `date_column`, `is_source_of_truth`, `is_active`).
+  - Strict tenant isolation via `CompanyScope` and foreign key cascade.
+  - REST API endpoints (`/api/v1/semantic/metrics`): Full CRUD for Admins; read-only listing for Analysts and Viewers.
+- **Business Terminology & Ambiguity Mapping (`SemanticTerm` Model & Migration)**:
+  - Schema: `semantic_terms` (`company_id`, `term`, `target_type`, `target_name`, `metric_id`, `definition`).
+  - Maps business jargon and synonyms to canonical metrics, tables, columns, or filters.
+  - Concept Ambiguity Integration: Terms mapped to `target_type = 'concept'` trigger intelligent clarification flows in `QuestionAmbiguityService` before SQL generation.
+  - Schema Relevance Scoring: Enriches `SchemaRelevanceService` to prioritize relevant tables based on company-specific business synonyms.
+- **Table Classification & Governance (`SemanticTableClassification` Model & Migration)**:
+  - Schema: `semantic_table_classifications` (`company_id`, `table_name`, `classification`, `description`, `is_preferred_source`, `preferred_for_concept`).
+  - Classifications: `business` (production), `staging` (pre-ingestion), `archive` (historical), `test` (mock data), `internal` (system logs).
+  - Flags preferred source-of-truth tables per business domain.
+- **Prompt Semantic Context Injection (`SemanticContextService`)**:
+  - Injects company-defined canonical metrics, source-of-truth rules, required filter constraints, and business synonyms directly into the Text-to-SQL LLM prompt.
+  - Explicitly instructs the AI engine to apply required filters and avoid staging or archive tables.
+- **SQL Semantic Validation & Warnings (`SqlSemanticValidator`)**:
+  - Validates generated and custom SQL against company semantic rules after generation and before execution.
+  - Analyzes AST and query structures to flag:
+    - `staging_table`: Using staging tables for reporting queries.
+    - `archive_table`: Querying historical/archived data tables.
+    - `filter_mismatch`: Failing to apply required metric filters (e.g. missing `status = 'completed'`).
+    - `non_canonical_table`: Querying non-preferred tables when canonical sources exist.
+- **Lightweight Data Lineage Graph (`SemanticContextService::buildLineageGraph()`)**:
+  - REST endpoint (`/api/v1/semantic/lineage?metric_id={id}`) returning directed node-edge lineage data.
+  - Maps multi-tier relationships: `Metric -> Source Column / Required Filter -> Source Table -> Related Foreign Key Joins`.
+- **Saved Query Semantic Drift Detection (`checkSemanticDrift`)**:
+  - Migrated `saved_queries` and `dashboard_widgets` to store semantic snapshots (`metric_id`, `semantic_version`, `semantic_snapshot`).
+  - REST endpoint (`/api/v1/semantic/drift/{savedQueryId}`) compares query execution snapshot with current active metric definitions.
+  - Detects formula, table, column, or filter definition changes and highlights differences.
+- **Frontend Semantic Layer & Lineage UI**:
+  - **Navigation & Management (`SemanticManagement.tsx`)**: New "Semantic Model" top-level navigation tab with dedicated sub-tabs for Metrics, Terms, Table Classifications, and Lineage Graph.
+  - **Interactive Lineage Visualizer (`LineageGraphView.tsx`)**: Visual node-link diagram rendering metrics, columns, filters, tables, and join connections with interactive metric selection.
+  - **Query Intent & Semantic Warnings Card (`QueryIntentCard.tsx` & `SemanticWarnings.tsx`)**: Displays detected business metrics, canonical source-of-truth badges, confidence meters, and warning banners for staging tables or missing filters.
+  - **Schema Explorer Badges (`TableSchema.tsx` & `SchemaExplorer.tsx`)**: Visual classification tags (`staging`, `archive`, `business`) and `⭐ Source of Truth` badges on database tables.
+  - **Saved Query Drift Banner (`SavedQueryList.tsx`)**: Alerts users when a saved query's underlying business metric has evolved, displaying visual diffs with line-through comparisons.
+- **RBAC & Security Verification**:
+  - Admin role has full write, update, and deletion permissions on metrics, terms, and classifications.
+  - Analyst and Viewer roles have read-only access.
+  - Strict tenant isolation prevents cross-company semantic leakage.
+- **Automated Tests**:
+  - `SemanticMetricTest.php` (7 tests) and `SemanticContextAndValidationTest.php` (8 tests).
+  - All 143 tests (1,490 assertions) passing. Clean Next.js build, 0 TypeScript errors, 0 ESLint errors.
+
 ## [0.14.0] - 2026-09-11
 ### Added (Phase 8 — Team Collaboration, Roles & Resource Permissions)
 - **Three-Tier Role Hierarchy (`admin`, `analyst`, `viewer`)**:

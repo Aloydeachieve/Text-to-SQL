@@ -25,8 +25,22 @@ export function ResultTable({ execution }: { execution: ExecutionInfo }) {
 
   return (
     <div className="space-y-3">
+      {execution.truncated && (
+        <div className="flex items-center gap-2 px-3 py-2 rounded-lg bg-amber-950/30 border border-amber-500/30 text-amber-200 text-xs">
+          <span className="font-semibold text-amber-300">⚠ Results Truncated:</span>
+          <span>Showing the first {execution.returned_rows ?? results.length} rows out of {execution.total_rows?.toLocaleString() ?? '1,000+'} to safeguard memory and browser performance.</span>
+        </div>
+      )}
+
       <div className="flex items-center justify-between text-[11px] text-slate-500 px-1 font-mono">
-        <span>Record Count: {results.length}</span>
+        <div className="flex items-center gap-2">
+          <span>Record Count: {results.length.toLocaleString()}</span>
+          {execution.truncated && (
+            <span className="px-1.5 py-0.5 rounded text-[10px] bg-amber-500/10 text-amber-400 border border-amber-500/20 font-semibold">
+              Capped at {execution.limit ?? 1000}
+            </span>
+          )}
+        </div>
         <span>Latency: {time_ms} ms</span>
       </div>
 

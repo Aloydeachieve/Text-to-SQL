@@ -1,6 +1,14 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { TableSchema } from './TableSchema';
-import { fetchSchema, fetchConnectionSchema, SchemaDetails } from '../../services/api';
+import {
+  fetchSchema,
+  fetchConnectionSchema,
+  fetchTableClassifications,
+  fetchSemanticMetrics,
+  SchemaDetails,
+  TableClassification,
+  SemanticMetric,
+} from '../../services/api';
 import { Card } from '../shared/Card';
 import { Loader } from '../shared/Loader';
 
@@ -14,6 +22,8 @@ export function SchemaExplorer({
   activeDatabaseName = 'Demo Database (MySQL)'
 }: SchemaExplorerProps) {
   const [schema, setSchema] = useState<SchemaDetails | null>(null);
+  const [classifications, setClassifications] = useState<TableClassification[]>([]);
+  const [metrics, setMetrics] = useState<SemanticMetric[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
@@ -22,14 +32,20 @@ export function SchemaExplorer({
   useEffect(() => {
     let ignore = false;
 
-    const promise = activeDatabaseConnectionId !== null && activeDatabaseConnectionId !== undefined
+    const schemaPromise = activeDatabaseConnectionId !== null && activeDatabaseConnectionId !== undefined
       ? fetchConnectionSchema(activeDatabaseConnectionId)
       : fetchSchema().then(res => res.data);
 
-    promise
-      .then(data => {
+    Promise.all([
+      schemaPromise,
+      fetchTableClassifications().catch(() => []),
+      fetchSemanticMetrics('', true).catch(() => []),
+    ])
+      .then(([schemaData, classData, metricsData]) => {
         if (!ignore) {
-          setSchema(data);
+          setSchema(schemaData);
+          setClassifications(classData);
+          setMetrics(metricsData);
           setError(null);
         }
       })
@@ -154,15 +170,27 @@ export function SchemaExplorer({
             </div>
           ) : (
             <div className="space-y-2.5 max-h-[440px] overflow-y-auto pr-1 custom-scrollbar">
-              {filteredTables.map((table, idx) => (
-                <TableSchema
-                  key={`${table.name}-${idx}`}
-                  table={table}
-                  relationships={schema.relationships}
-                  forceOpen={forceOpen}
-                  searchFilter={searchQuery}
-                />
-              ))}
+              {filteredTables.map((table, idx) => {
+                const tableLower = table.name.toLowerCase();
+                const tableClassification = classifications.find(
+                  (c) => c.table_name.toLowerCase() === tableLower
+                );
+                const tableMetrics = metrics.filter(
+                  (m) => m.source_table.toLowerCase() === tableLower
+                );
+
+                return (
+                  <TableSchema
+                    key={`${table.name}-${idx}`}
+                    table={table}
+                    relationships={schema.relationships}
+                    forceOpen={forceOpen}
+                    searchFilter={searchQuery}
+                    classification={tableClassification}
+                    associatedMetrics={tableMetrics}
+                  />
+                );
+              })}
             </div>
           )}
         </div>

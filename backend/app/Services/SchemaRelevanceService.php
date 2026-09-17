@@ -153,7 +153,7 @@ class SchemaRelevanceService
      *     all_table_names: list<string>
      * }
      */
-    public function selectRelevantSchema(string $question, array $normalizedSchema): array
+    public function selectRelevantSchema(string $question, array $normalizedSchema, ?int $companyId = null): array
     {
         $allTables = $normalizedSchema['tables'] ?? [];
         $relationships = $normalizedSchema['relationships'] ?? [];
@@ -182,6 +182,7 @@ class SchemaRelevanceService
 
         // 1. Tokenize question and extract candidate keywords
         $tokens = $this->tokenizeQuestion($question);
+        $effectiveTerms = $this->getEffectiveBusinessTerms($companyId);
 
         // 2. Score tables based on name match, column match, and business term mapping
         $tableScores = [];
@@ -223,8 +224,8 @@ class SchemaRelevanceService
 
             // Business terms matching
             foreach ($tokens as $token) {
-                if (isset($this->businessTerms[$token])) {
-                    $termInfo = $this->businessTerms[$token];
+                if (isset($effectiveTerms[$token])) {
+                    $termInfo = $effectiveTerms[$token];
                     // Check if table is in business term tables (exact or singular form match)
                     foreach ($termInfo['tables'] as $bTable) {
                         if ($tableName === $bTable || $this->singularize($tableName) === $this->singularize($bTable)) {
@@ -591,5 +592,47 @@ class SchemaRelevanceService
             return substr($w, 0, -1);
         }
         return $w;
+    }
+
+    /**
+     * Merge standard business terminology with company-defined semantic terms.
+     *
+     * @param int|null $companyId
+     * @return array<string, array{tables: list<string>, columns: list<string>, concepts: list<string>}>
+     */
+    protected function getEffectiveBusinessTerms(?int $companyId = null): array
+    {
+        $terms = $this->businessTerms;
+
+        if (!$companyId) {
+            return $terms;
+        }
+
+        try {
+            $customTerms = \App\Models\SemanticTerm::where('company_id', $companyId)
+                ->with('metric')
+                ->get();
+
+            foreach ($customTerms as $ct) {
+                $termKey = strtolower(trim($ct->term));
+                if (!isset($terms[$termKey])) {
+                    $terms[$termKey] = ['tables' => [], 'columns' => [], 'concepts' => []];
+                }
+
+                if ($ct->target_type === 'table') {
+                    $terms[$termKey]['tables'][] = strtolower($ct->target_name);
+                } elseif ($ct->target_type === 'column') {
+                    $terms[$termKey]['columns'][] = strtolower($ct->target_name);
+                } elseif ($ct->target_type === 'metric' && $ct->metric) {
+                    $terms[$termKey]['tables'][] = strtolower($ct->metric->source_table);
+                    $terms[$termKey]['columns'][] = strtolower($ct->metric->source_column);
+                    $terms[$termKey]['concepts'][] = strtolower($ct->metric->name);
+                }
+            }
+        } catch (\Throwable $e) {
+            // Fallback to default terms on DB issue
+        }
+
+        return $terms;
     }
 }

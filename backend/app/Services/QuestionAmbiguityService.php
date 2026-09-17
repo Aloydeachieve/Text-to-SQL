@@ -51,9 +51,10 @@ class QuestionAmbiguityService
      * Check if a question is ambiguous.
      *
      * @param string $question
+     * @param int|null $companyId
      * @return array{ambiguous: bool, clarification: ?string, suggestions: list<string>}
      */
-    public function evaluateAmbiguity(string $question): array
+    public function evaluateAmbiguity(string $question, ?int $companyId = null): array
     {
         $trimmed = trim($question);
 
@@ -64,6 +65,30 @@ class QuestionAmbiguityService
                     'clarification' => $entry['clarification'],
                     'suggestions' => $entry['suggestions'],
                 ];
+            }
+        }
+
+        if ($companyId) {
+            try {
+                $conceptTerms = \App\Models\SemanticTerm::where('company_id', $companyId)
+                    ->where('target_type', 'concept')
+                    ->get();
+
+                $lower = strtolower($trimmed);
+                foreach ($conceptTerms as $term) {
+                    if (str_contains($lower, strtolower($term->term))) {
+                        return [
+                            'ambiguous' => true,
+                            'clarification' => $term->definition ?? "The term '{$term->term}' is ambiguous. Please specify which definition or metric you mean.",
+                            'suggestions' => [
+                                "Show {$term->term} summary",
+                                "Explore {$term->term} details",
+                            ],
+                        ];
+                    }
+                }
+            } catch (\Throwable $e) {
+                // Ignore DB error and proceed
             }
         }
 

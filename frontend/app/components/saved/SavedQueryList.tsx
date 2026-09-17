@@ -1,7 +1,14 @@
 'use client';
 
-import React, { useState, useMemo } from 'react';
-import { SavedQuery, DatabaseConnectionItem, AuthUser, ResourceVisibility } from '../../services/api';
+import React, { useState, useMemo, useEffect } from 'react';
+import {
+  SavedQuery,
+  DatabaseConnectionItem,
+  AuthUser,
+  ResourceVisibility,
+  checkSemanticDrift,
+  SemanticDriftResult,
+} from '../../services/api';
 import { VisibilityBadge } from '../shared/VisibilityBadge';
 import { ShareResourceModal } from '../shared/ShareResourceModal';
 
@@ -36,6 +43,34 @@ export function SavedQueryList({
   const [selectedConnectionFilter, setSelectedConnectionFilter] = useState<string>('all');
   const [deletingId, setDeletingId] = useState<number | null>(null);
   const [sharingQuery, setSharingQuery] = useState<SavedQuery | null>(null);
+  const [driftMap, setDriftMap] = useState<Record<number, SemanticDriftResult>>({});
+
+  useEffect(() => {
+    let ignore = false;
+    const queriesWithMetric = savedQueries.filter((q) => Boolean(q.metric_id));
+    if (queriesWithMetric.length === 0) return;
+
+    Promise.all(
+      queriesWithMetric.map((q) =>
+        checkSemanticDrift(q.id)
+          .then((res) => ({ id: q.id, res }))
+          .catch(() => null)
+      )
+    ).then((results) => {
+      if (ignore) return;
+      const map: Record<number, SemanticDriftResult> = {};
+      results.forEach((item) => {
+        if (item && item.res) {
+          map[item.id] = item.res;
+        }
+      });
+      setDriftMap(map);
+    });
+
+    return () => {
+      ignore = true;
+    };
+  }, [savedQueries]);
 
   // Client-side filtering
   const filteredQueries = useMemo(() => {
@@ -277,6 +312,13 @@ export function SavedQueryList({
                           </span>
                         )}
 
+                        {/* Business Metric Badge */}
+                        {query.metric_id && (
+                          <span className="text-[10px] px-2 py-0.5 rounded-full font-bold bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
+                            🧠 {driftMap[query.id]?.metric_name || 'Metric'}
+                          </span>
+                        )}
+
                         <span className="text-[10px] text-slate-500 font-mono">
                           {new Date(query.created_at).toLocaleDateString([], {
                             month: 'short',
@@ -338,6 +380,31 @@ export function SavedQueryList({
                     <p className="text-xs text-slate-400 leading-relaxed line-clamp-2">
                       {query.description}
                     </p>
+                  )}
+
+                  {/* Semantic Drift Alert Banner */}
+                  {driftMap[query.id]?.has_drift && (
+                    <div className="p-3 rounded-xl bg-amber-950/30 border border-amber-500/40 text-amber-200 text-xs space-y-1.5 animate-fadeIn">
+                      <div className="flex items-center space-x-2">
+                        <span className="text-amber-400 font-bold">⚠</span>
+                        <span className="font-bold text-amber-300">Semantic Definition Changed</span>
+                        <span className="text-[10px] px-1.5 py-0.2 rounded bg-amber-500/20 text-amber-300 font-mono">
+                          Review recommended
+                        </span>
+                      </div>
+                      <p className="text-[11px] text-amber-200/90 leading-relaxed">
+                        {driftMap[query.id].reason || 'The business metric definition has changed since this query was saved.'}
+                      </p>
+                      {driftMap[query.id].changes.length > 0 && (
+                        <div className="pt-1 flex flex-wrap gap-1.5">
+                          {driftMap[query.id].changes.map((ch, i) => (
+                            <span key={i} className="text-[10px] font-mono bg-slate-950/80 px-2 py-0.5 rounded border border-amber-500/20 text-slate-300">
+                              {ch.field}: <span className="line-through text-rose-400">{ch.original}</span> → <span className="text-emerald-400">{ch.current}</span>
+                            </span>
+                          ))}
+                        </div>
+                      )}
+                    </div>
                   )}
 
                   {/* Original Question Quote */}
